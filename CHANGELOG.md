@@ -19,3 +19,10 @@ First release.
 - Templates and `$HOME`-side deletions are reported and never captured
   automatically. Push only ever goes to the branch's existing upstream, and
   never force-pushes.
+- The panel states the outcome of an action instead of only logging it: success
+  offers **Close**, failure shows what broke and offers **Retry**.
+- One instance runs per monitor; finishing an action refreshes the other
+  monitors so their counts stay in step.
+- `push` and `commit` exit non-zero when they fail, so a refused push is
+  reported as a failure rather than a success.
+- The panel is titled after the plugin.
