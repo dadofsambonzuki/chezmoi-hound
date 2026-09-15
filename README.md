@@ -28,11 +28,15 @@ seen, and **capture and commit** what this machine has edited.
 Omarchy 4 (Quattro) with the Omarchy shell:
 
 ```sh
-omarchy plugin add https://github.com/dadofsambonzuki/chezmoi-hound.git --enable
+omarchy plugin add https://github.com/dadofsambonzuki/chezmoi-hound.git --enable --yes
 ```
 
 That clones the plugin, registers it with the shell and enables it. The count
 appears in the bar's right section (drag it wherever you like afterwards).
+
+`omarchy plugin add` prints Omarchy's warning that plugins run unsandboxed inside
+the shell and asks you to confirm before it continues; `--yes` accepts it. [Review
+the code](bin/chezmoi-hound-check) first — it is short on purpose.
 
 If your chezmoi source is not the one chezmoi is configured for — for example you
 normally run `chezmoi --source ~/Projects/dotfiles` — open the widget's settings

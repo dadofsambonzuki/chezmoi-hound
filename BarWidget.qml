@@ -4,25 +4,19 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Chezmoi Hound - a count of dotfile drift that hunts it down.
+// Chezmoi Hound - a count of dotfile drift, and the two things it makes you
+// want to do about it.
 //
-// The number is three things added up:
+// The number is three parts added up: managed targets this machine has edited
+// and the source has not captured, paths the source repo's own working tree is
+// holding uncommitted, and commits the remote has not seen. The badge is silent
+// while everything is in sync - a permanent zero is noise.
 //
-//   home      targets this machine has edited and the source has not captured
-//   repo      paths the source repo's own working tree is holding uncommitted
-//   unpushed  commits in the source repo the remote has not seen
-//
-// Nothing is counted here. bin/chezmoi-hound-check does that and answers in a
-// line protocol this file parses; the panel's two buttons run
-// bin/chezmoi-hound-act. Both are the plugin's own scripts, so the widget needs
-// no jq, no cache file, no systemd timer and no ~/.local/bin of its own - it
-// re-asks on its own clock and after every action.
-//
-// Clicking the count opens the panel: it names the drifting items and offers
-// the two things a count of drift makes you want to do (push what the remote
-// has not seen, capture and commit what this machine has edited). The badge
-// itself is only ever a number, and it is silent when everything agrees, because
-// a permanent zero is noise.
+// Neither the counting nor the git work happens in QML. bin/chezmoi-hound-check
+// is polled on a timer and answers in a line protocol, and the panel's two
+// buttons run bin/chezmoi-hound-act. Both ship next to this file, so the plugin
+// depends on chezmoi and git and on nothing else the author happens to have
+// installed; the widget itself never shells out to git.
 Panel {
   id: root
   moduleName: "io.github.dadofsambonzuki.chezmoi-hound"
@@ -31,27 +25,41 @@ Panel {
   // allows, so it can answer status()/geometry() as well as open/close.
   manageIpc: false
 
-  // ---- the plugin's own scripts -------------------------------------------
-  // Resolved from this file, not from $HOME: the widget is meant to work from
-  // wherever it was installed.
+  // ---- bar geometry -------------------------------------------------------
+  // A popup widget is a Panel, which carries no bar geometry of its own, so the
+  // two properties every bar widget reads are defined here with a fallback for
+  // the moment before the host injects `bar`.
+  readonly property bool vertical: bar ? bar.vertical : false
+  readonly property int barSize: bar ? bar.barSize : Style.bar.sizeHorizontal
+
+  // ---- settings -----------------------------------------------------------
+  // The source directory is the one setting that cannot be guessed: a machine
+  // that passes `chezmoi --source DIR` in a wrapper has no source in chezmoi's
+  // own configuration, so `chezmoi source-path` cannot name it. Empty means
+  // "whatever chezmoi is configured with".
+  readonly property string sourceDir: String(setting("sourceDir", "")).replace(/^\s+|\s+$/g, "")
+
+  readonly property int checkSeconds: {
+    var n = Number(setting("checkSeconds", 300))
+    if (!isFinite(n) || n < 60) return 300      // a floor, not a preference:
+    if (n > 3600) return 3600                   // this runs git on a timer
+    return Math.floor(n)
+  }
+  readonly property int pollInterval: root.checkSeconds * 1000
+
+  readonly property bool showWhenClean: String(setting("whenClean", "Hide")) === "Show"
+
+  // ---- the plugin's own scripts ------------------------------------------
+  // Resolved next to this file, because a plugin that shells out to something
+  // in one user's ~/.local/bin only works on the machine it was written on.
   readonly property string checkScript: Qt.resolvedUrl("bin/chezmoi-hound-check").toString().replace(/^file:\/\//, "")
   readonly property string actScript: Qt.resolvedUrl("bin/chezmoi-hound-act").toString().replace(/^file:\/\//, "")
 
-  // ---- settings -----------------------------------------------------------
-  // Settings arrive from the shell and are treated as input like everything
-  // else: the source is a path that gets handed to a command, so it is trimmed
-  // and the interval is clamped rather than trusted.
-  readonly property string source: String(setting("source", "")).trim()
-  readonly property int checkSeconds: {
-    var n = Number(setting("checkSeconds", 300))
-    if (!isFinite(n) || n < 60) n = 300
-    if (n > 3600) n = 3600
-    return Math.floor(n)
-  }
-  readonly property bool showWhenClean: String(setting("whenClean", "Hide")) === "Show"
+  // A reading is input from another process, so it is bounded in size, type-
+  // and range-checked, and a reading that disagrees with itself is rejected
+  // outright instead of shown half-believed.
+  readonly property int maxBytes: 65536
 
-  // The plugin's own reading, and the last one that parsed: a failed run leaves
-  // the previous numbers on screen rather than emptying the badge.
   property int homeCount: 0
   property int repoCount: 0
   property int unpushed: 0
@@ -61,13 +69,11 @@ Panel {
   property var repoDetail: []
   property var notes: []
   property string stamp: ""
-  property string branch: ""
+  property string reportedSource: ""
+  property string branchName: ""
   property string upstream: ""
-  property string srcDir: ""
-  property string error: ""
+  property string problem: ""
   property bool everLoaded: false
-
-  readonly property int maxBytes: 32768
 
   // ---- action state -------------------------------------------------------
   // Which action is in flight ("" when idle). While one runs the buttons are
@@ -76,44 +82,24 @@ Panel {
   property string running: ""
   property var logLines: []
 
-  function bounded(value, high) {
-    return (typeof value === "number" && isFinite(value) && value >= 0 && value <= high)
-      ? Math.floor(value)
-      : 0
-  }
-
-  // bar.showTooltip renders with AutoText, which this plugin cannot pin to
-  // PlainText, so markup and control characters are stripped before handoff.
-  function plain(value) {
-    return String(value)
-      .replace(/[<>&]/g, "")
-      .replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
-      .substring(0, 200)
-  }
-
+  // -1 means "the record was there but was not a count", which is different
+  // from 0 and must not be mistaken for a valid reading.
   function countOf(value) {
-    var n = Number(value)
+    var n = Number(String(value))
     return (isFinite(n) && n >= 0 && n <= 100000) ? Math.floor(n) : -1
   }
 
-  // The line protocol: one "key<TAB>value" record per line, in any order. A
-  // reading is only accepted when all four counts arrived and agree with each
-  // other, so a half-written or truncated run cannot move the badge.
-  function applyReading(raw) {
+  // The reading is a line protocol - "key<TAB>value", one record per line, in
+  // no particular order - so the widget needs no JSON parser and the script
+  // needs no jq.
+  function apply(raw) {
     var text = String(raw || "")
-    if (text.length > maxBytes) return false
+    if (text.length === 0 || text.length > maxBytes) return false
 
     var lines = text.split("\n")
-    var home = -1
-    var repo = -1
-    var unpushed = -1
-    var total = -1
-    var files = []
-    var commitsOut = []
-    var repoFiles = []
-    var notesOut = []
-    var src = ""
-    var failed = ""
+    var home = -1, repo = -1, unpushed = -1, total = -1
+    var detail = [], commits = [], repoDetail = [], notes = []
+    var src = "", branch = "", upstream = "", stamp = "", problem = ""
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
@@ -126,21 +112,24 @@ Panel {
       else if (key === "repo") repo = countOf(value)
       else if (key === "unpushed") unpushed = countOf(value)
       else if (key === "total") total = countOf(value)
-      else if (key === "file") { if (files.length < 10) files.push(plain(value)) }
-      else if (key === "commit") { if (commitsOut.length < 10) commitsOut.push(plain(value)) }
-      else if (key === "repofile") { if (repoFiles.length < 10) repoFiles.push(plain(value)) }
-      else if (key === "note") notesOut.push(plain(value))
-      else if (key === "error") failed = plain(value)
+      else if (key === "file") { if (detail.length < 8) detail.push(plain(value)) }
+      else if (key === "commit") { if (commits.length < 8) commits.push(plain(value)) }
+      else if (key === "repofile") { if (repoDetail.length < 8) repoDetail.push(plain(value)) }
+      else if (key === "note") { if (notes.length < 4) notes.push(plain(value)) }
+      else if (key === "error") problem = plain(value)
       else if (key === "source") src = plain(value)
       else if (key === "branch") branch = plain(value)
       else if (key === "upstream") upstream = plain(value)
-      else if (key === "stamp") stamp = plain(value)
+      else if (key === "stamp") stamp = value.substring(0, 32)
     }
 
-    if (failed !== "") {
-      root.error = failed
+    // An error record is a complete answer: say so and keep the last reading.
+    if (problem !== "") {
+      root.problem = problem
       return false
     }
+    // The three parts must add up; a reading that disagrees with itself is
+    // rejected rather than shown half-believed.
     if (home < 0 || repo < 0 || unpushed < 0 || total < 0) return false
     if (home + repo + unpushed !== total) return false
 
@@ -148,31 +137,37 @@ Panel {
     root.repoCount = repo
     root.unpushed = unpushed
     root.total = total
-    root.detail = files
-    root.commits = commitsOut
-    root.repoDetail = repoFiles
-    root.notes = notesOut
-    root.srcDir = src
+    root.detail = detail
+    root.commits = commits
+    root.repoDetail = repoDetail
+    root.notes = notes
+    root.reportedSource = src
+    root.branchName = branch
+    root.upstream = upstream
+    root.stamp = stamp
+    root.problem = ""
     root.everLoaded = true
-    root.error = ""
     return true
+  }
+
+  // bar.showTooltip renders with AutoText, which this plugin cannot pin to
+  // PlainText, so markup and control characters are stripped before handoff.
+  function plain(value) {
+    return String(value)
+      .replace(/[<>&]/g, "")
+      .replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+      .substring(0, 200)
   }
 
   function plural(count, noun) {
     return count + " " + noun + (count === 1 ? "" : "s")
   }
 
-  function countText() {
-    return String(root.total)
-  }
-
   function tooltip() {
-    if (root.error !== "") return "Chezmoi Hound: " + root.error
-
     if (root.total === 0) {
       return root.everLoaded
         ? "Dotfiles in sync" + (root.stamp ? "  ·  checked " + root.stamp : "")
-        : "No reading yet"
+        : "No dotfiles reading yet  ·  the first check is on its way"
     }
 
     var parts = []
@@ -190,10 +185,15 @@ Panel {
     return out
   }
 
+  // Naive plural: these are file counts, never language-facing prose.
+  function countText() {
+    return String(root.total)
+  }
+
   function heroPhrase() {
     if (root.running !== "") return root.running === "push" ? "pushing…" : "capturing and committing…"
-    if (root.error !== "") return "Could not read the source"
-    if (root.total === 0) return root.everLoaded ? "In sync" : "No reading yet"
+    if (root.problem !== "") return "Cannot read the dotfiles"
+    if (root.total === 0) return root.everLoaded ? "In sync" : "Reading…"
     var parts = []
     if (root.homeCount > 0) parts.push(root.plural(root.homeCount, "edit") + " not captured")
     if (root.repoCount > 0) parts.push(root.plural(root.repoCount, "repo change") + " uncommitted")
@@ -202,116 +202,60 @@ Panel {
   }
 
   function repoPhrase() {
-    var where = root.srcDir !== "" ? root.srcDir : root.source
-    var line = where !== "" ? where : "chezmoi's own source"
-    if (root.branch !== "") line += "  ·  " + root.branch + (root.upstream !== "" ? " -> " + root.upstream : " (no upstream)")
-    line += "\nClick to act  ·  middle-click re-checks  ·  right-click for details"
-    if (root.stamp !== "") line += "\nchecked " + root.stamp
-    return line
+    var where = root.sourceDir !== "" ? root.sourceDir : (root.reportedSource !== "" ? root.reportedSource : "chezmoi's default source")
+    if (root.branchName !== "") where += "  ·  " + root.branchName
+    return where
+      + (root.stamp ? "\nchecked " + root.stamp : "")
   }
 
-  // ---- running the scripts ------------------------------------------------
+  // ---- actions ------------------------------------------------------------
 
-  // --source is only passed when the setting names one: without it chezmoi
-  // answers for the source it is configured for, which is the common case.
-  function checkCommand() {
-    var c = ["/usr/bin/timeout", "-k", "2", "60", root.checkScript]
-    if (root.source !== "") c.push("--source", root.source)
-    return c
+  // Both buttons go through here, so there is exactly one place that decides
+  // what a click runs and one place that refreshes the badge afterwards.
+  function runAction(what) {
+    if (actionProc.running || root.running !== "") return
+    root.logLines = []
+    root.running = what
+    // 180s: capturing a large tree can take a while, and a half-captured tree
+    // abandoned by a timeout is worse than a slow button.
+    actionProc.command = withSource(["/usr/bin/timeout", "-k", "2", "180", root.actScript,
+                                     what === "push" ? "push" : "commit"])
+    actionProc.running = true
   }
 
-  function detailCommand() {
-    var c = ["/usr/bin/omarchy-launch-floating-terminal-with-presentation", root.checkScript, "--render"]
-    if (root.source !== "") c.push("--source", root.source)
-    return c
-  }
-
-  function actionCommand(what) {
-    var c = ["/usr/bin/timeout", "-k", "2", "180", root.actScript, what === "push" ? "push" : "commit"]
-    if (root.source !== "") c.push("--source", root.source)
-    return c
+  // The source argument is appended in exactly one place, so no call can forget
+  // it and read a different tree than the badge is showing.
+  function withSource(args) {
+    var out = [].concat(args)
+    if (root.sourceDir !== "") out.push("--source", root.sourceDir)
+    return out
   }
 
   function refresh() {
     if (checkProc.running) return
-    checkProc.command = root.checkCommand()
+    checkProc.command = withSource(["/usr/bin/timeout", "-k", "2", "60", root.checkScript])
     checkProc.running = true
-  }
-
-  function runAction(what) {
-    if (actionProc.running || root.running !== "") return
-    root.logLines = []
-    root.running = what === "push" ? "push" : "commit"
-    actionProc.command = root.actionCommand(what)
-    actionProc.running = true
-  }
-
-  function addLog(line) {
-    var text = String(line)
-    if (text.trim() === "") return
-    var next = root.logLines.slice()
-    next.push(root.plain(text))
-    // Bounded: this is a panel, not a scrollback.
-    if (next.length > 12) next = next.slice(next.length - 12)
-    root.logLines = next
   }
 
   visible: root.total > 0 || root.showWhenClean
   implicitWidth: vertical ? barSize : (badge.width + Style.spaceReal(6))
   implicitHeight: vertical ? (badge.height + Style.spaceReal(6)) : barSize
 
-  // The clock. triggerOnStart means the first reading happens when the shell
-  // loads the widget rather than one interval later.
+  // The reading is taken on a timer rather than watched in a file: it is a few
+  // chezmoi and git calls, and doing it here means the badge is right on a
+  // machine that has never heard of a systemd timer.
   Timer {
-    id: poll
-    interval: Math.max(60, root.checkSeconds) * 1000
+    interval: root.pollInterval
     repeat: true
     running: true
     triggeredOnStart: true
     onTriggered: root.refresh()
   }
 
-  Process {
-    id: checkProc
-    stdout: StdioCollector {
-      id: checkOut
-      waitForEnd: true
-    }
-    stderr: StdioCollector {
-      id: checkErr
-      waitForEnd: true
-    }
-    onExited: function (code, status) {
-      var accepted = root.applyReading(checkOut.text)
-      if (!accepted && root.error === "") {
-        var e = String(checkErr.text || "").trim()
-        root.error = e !== ""
-          ? root.plain(e.split("\n")[0])
-          : "chezmoi-hound-check exited " + code + " without a reading"
-      }
-    }
-  }
-
+  // Right-click only: the old behaviour, kept because a floating terminal is
+  // the one place the full `git diff`-worthy detail can be copied out of.
   Process {
     id: detailProc
-    command: root.detailCommand()
-  }
-
-  Process {
-    id: actionProc
-    stdout: SplitParser {
-      onRead: function (line) { root.addLog(line) }
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: { root.addLog(String(text || "")) }
-    }
-    onExited: function (exitCode, exitStatus) {
-      root.running = ""
-      // The scripts count for their own log; re-reading is what makes the badge
-      // and this panel show the new numbers the moment the action finishes.
-      root.refresh()
-    }
   }
 
   Row {
@@ -340,8 +284,8 @@ Panel {
     cursorShape: Qt.PointingHandCursor
 
     // Left opens the panel, which both lists the drift and offers the two
-    // actions. Middle re-asks now rather than waiting for the timer. Right keeps
-    // the floating terminal, for the full text that can be copied out of.
+    // actions. Middle re-runs the check now rather than waiting for the timer.
+    // Right keeps the floating terminal for the full text.
     onClicked: function (mouse) {
       if (root.bar) root.bar.hideTooltip(root)
       if (mouse.button === Qt.LeftButton) {
@@ -349,15 +293,69 @@ Panel {
       } else if (mouse.button === Qt.MiddleButton) {
         root.refresh()
       } else {
-        if (!detailProc.running) detailProc.running = true
+        if (!detailProc.running) {
+          detailProc.command = withSource(["/usr/bin/omarchy-launch-floating-terminal-with-presentation",
+                                           root.checkScript, "--render"])
+          detailProc.running = true
+        }
       }
     }
     onEntered: if (root.bar && !root.opened) root.bar.showTooltip(root, root.tooltip())
     onExited: if (root.bar) root.bar.hideTooltip(root)
   }
 
+  Process {
+    id: checkProc
+    stdout: StdioCollector {
+      id: checkOut
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      id: checkErr
+      waitForEnd: true
+    }
+    onExited: function (code, status) {
+      var applied = root.apply(checkOut.text)
+      if (!applied && root.problem === "") {
+        var err = plain(String(checkErr.text || "").trim())
+        root.problem = err !== "" ? err : "chezmoi-hound-check exited " + code
+      }
+    }
+  }
+
+  Process {
+    id: actionProc
+    stdout: SplitParser {
+      onRead: function (line) {
+        var next = root.logLines.slice()
+        next.push(String(line))
+        // Bounded: this is a panel, not a scrollback.
+        if (next.length > 12) next = next.slice(next.length - 12)
+        root.logLines = next
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var text = String(text || "").trim()
+        if (text === "") return
+        var next = root.logLines.slice()
+        next.push(text)
+        if (next.length > 12) next = next.slice(next.length - 12)
+        root.logLines = next
+      }
+    }
+    onExited: function (exitCode, exitStatus) {
+      root.running = ""
+      // Re-read, so the badge and this panel show the new counts immediately
+      // rather than at the next tick.
+      root.refresh()
+    }
+  }
+
   // The panel: the shape of the drift, then the buttons that act on it, then
-  // the log of the last action.
+  // the log of the last action. Everything it shows comes from the cache, so
+  // opening it costs nothing.
   KeyboardPanel {
     id: panel
     anchorItem: badge
@@ -365,7 +363,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(440))
+    contentWidth: panel.fittedContentWidth(Style.space(420))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
     PanelKeyCatcher {
@@ -382,7 +380,7 @@ Panel {
 
         PanelHero {
           width: parent.width
-          title: "Chezmoi Hound"
+          title: "Dotfiles"
           meta: root.heroPhrase()
           detail: root.repoPhrase()
           foreground: root.bar.foreground
@@ -429,12 +427,27 @@ Panel {
           }
         }
 
+        // Whatever the reading could not do - no chezmoi, no source tree, a
+        // git command that failed - is said plainly instead of leaving the
+        // panel insisting everything is fine.
+        Text {
+          width: parent.width
+          visible: root.problem !== "" || root.notes.length > 0
+          textFormat: Text.PlainText
+          text: root.problem !== "" ? root.problem : root.notes.join("\n")
+          color: root.bar.foreground
+          opacity: 0.7
+          wrapMode: Text.WordWrap
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
         PanelSeparator {
           visible: root.unpushed > 0 && (root.homeCount > 0 || root.repoCount > 0)
           foreground: root.bar.foreground
         }
 
-        // ---- edits made on this machine that the source has not got ----
+        // ---- edits made on this machine that the repo has not got ----
         Column {
           width: parent.width
           spacing: Style.space(8)
@@ -478,14 +491,14 @@ Panel {
           foreground: root.bar.foreground
         }
 
-        // ---- the source repo's own working tree ----
+        // ---- the repo's own working tree ----
         Column {
           width: parent.width
           spacing: Style.space(8)
           visible: root.repoCount > 0
 
           PanelSectionHeader {
-            text: "UNCOMMITTED IN THE SOURCE — " + root.plural(root.repoCount, "path")
+            text: "UNCOMMITTED IN THE REPO — " + root.plural(root.repoCount, "path")
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
           }
@@ -519,44 +532,16 @@ Panel {
 
         Text {
           width: parent.width
-          visible: root.total === 0 && root.error === ""
+          visible: root.total === 0
           textFormat: Text.PlainText
           text: root.everLoaded
-            ? "$HOME, the source and the remote all agree. Nothing to do."
-            : "No reading yet."
+            ? "$HOME, the repo and the remote all agree. Nothing to do."
+            : "No reading yet — the first check is on its way."
           color: root.bar.foreground
           opacity: 0.7
           wrapMode: Text.WordWrap
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.bodySmall
-        }
-
-        // A reading that failed is said out loud, with the source it failed on:
-        // a badge stuck on a stale number is worse than one that admits it.
-        Text {
-          width: parent.width
-          visible: root.error !== ""
-          textFormat: Text.PlainText
-          text: root.error
-          color: root.bar.foreground
-          opacity: 0.85
-          wrapMode: Text.WordWrap
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.bodySmall
-        }
-
-        Repeater {
-          model: root.notes
-          Text {
-            width: parent.width
-            textFormat: Text.PlainText
-            text: modelData
-            color: root.bar.foreground
-            opacity: 0.6
-            wrapMode: Text.WordWrap
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
         }
 
         // ---- what the last action did ----
@@ -621,7 +606,9 @@ Panel {
   }
 
   // Proves what the badge is actually showing, without reading pixels off the
-  // screen: `omarchy-shell io.github.dadofsambonzuki.chezmoi-hound status`.
+  // screen: `omarchy-shell <id> status`. The other commands are the same entry
+  // points the buttons call, so an action can be exercised without a synthetic
+  // click.
   IpcHandler {
     target: "io.github.dadofsambonzuki.chezmoi-hound"
 
@@ -632,10 +619,11 @@ Panel {
     function status(): string {
       return "total=" + root.total + " home=" + root.homeCount + " repo=" + root.repoCount
         + " unpushed=" + root.unpushed + " visible=" + root.visible
-        + " source=" + (root.srcDir !== "" ? root.srcDir : "(chezmoi default)")
-        + " branch=" + root.branch
-        + " loaded=" + root.everLoaded
-        + " error=" + (root.error === "" ? "none" : root.error)
+        + " running=" + (root.running === "" ? "idle" : root.running)
+        + " problem=" + (root.problem === "" ? "none" : root.problem)
+        + " source=" + (root.sourceDir !== "" ? root.sourceDir : (root.reportedSource === "" ? "unset" : root.reportedSource))
+        + " branch=" + (root.branchName === "" ? "unset" : root.branchName)
+        + " stamp=" + root.stamp
         + " text=" + root.countText() + " badgeW=" + Math.round(badge.width)
     }
 
@@ -653,15 +641,25 @@ Panel {
       return "opened=" + root.opened + " running=" + (root.running === "" ? "idle" : root.running)
         + " commits=" + root.commits.length + " detail=" + root.detail.length
         + " repoDetail=" + root.repoDetail.length + " log=" + root.logLines.length
-        + " notes=" + root.notes.length
         + " canPush=" + (root.unpushed > 0) + " canCommit=" + (root.homeCount + root.repoCount > 0)
-        + " query=" + panel.fittedContentWidth(Style.space(440))
+        + " query=" + panel.fittedContentWidth(Style.space(420))
         + "x" + panel.fittedContentHeight(column.implicitHeight)
     }
 
     function commit(): void { root.runAction("commit") }
     function push(): void { root.runAction("push") }
-    function refresh(): void { root.refresh() }
+
+    function refresh(): void {
+      root.refresh()
+    }
+
+    function check(): void {
+      root.refresh()
+    }
+
+    function reread(): void {
+      root.refresh()
+    }
   }
 
   // Keep bar drag-to-reorder working, the way WidgetButton does.

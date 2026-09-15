@@ -7,7 +7,9 @@
   "license": "MIT",
   "homepage": "https://github.com/dadofsambonzuki/chezmoi-hound",
   "description": "A bar count of dotfile drift that hunts it down. It adds up what this machine has edited and the source has not captured, what the source repo has not committed, and what the remote has not seen - then the panel names the items and offers to push them or capture and commit them.",
-  "kinds": ["bar-widget"],
+  "kinds": [
+    "bar-widget"
+  ],
   "activation": "on-demand",
   "entryPoints": {
     "barWidget": "BarWidget.qml"
@@ -16,17 +18,21 @@
     "displayName": "Chezmoi Hound",
     "description": "Dotfile drift across $HOME, the source repo and its remote, with push and capture-and-commit actions.",
     "category": "System",
-    "aliases": ["dotfiles", "chezmoi", "drift"],
+    "aliases": [
+      "dotfiles",
+      "chezmoi",
+      "drift"
+    ],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "source": "",
+      "sourceDir": "",
       "checkSeconds": 300,
       "whenClean": "Hide"
     },
     "schema": [
       {
-        "key": "source",
+        "key": "sourceDir",
         "type": "string",
         "label": "chezmoi source directory",
         "defaultValue": "",
@@ -45,7 +51,10 @@
         "key": "whenClean",
         "type": "enum",
         "label": "When everything is in sync",
-        "options": ["Hide", "Show"],
+        "options": [
+          "Hide",
+          "Show"
+        ],
         "defaultValue": "Hide",
         "description": "Hide keeps the bar free of a permanent zero."
       }
