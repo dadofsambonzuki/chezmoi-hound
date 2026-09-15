@@ -2,6 +2,8 @@
 
 A bar count of **dotfile drift** that hunts it down.
 
+![Chezmoi Hound](./preview.png)
+
 Chezmoi Hound adds up three different kinds of drift into one number in the
 Omarchy bar, and when you click that number it names the items and offers the two
 things a count of drift makes you want to do: **push** what the remote has not
@@ -90,6 +92,8 @@ The two action buttons only appear when there is something for them to do.
 When an action finishes, the panel says what happened rather than leaving you to
 read it out of the log: a success offers **Close**, and a failure shows what
 broke and offers **Retry**.
+
+![The panel after a failed push](./docs/outcome.png)
 
 Every monitor shows the same count. There is one bar surface per screen, so the
 widget runs once per monitor; finishing an action on one screen tells the others
