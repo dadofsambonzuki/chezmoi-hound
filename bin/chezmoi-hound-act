@@ -1,0 +1,200 @@
+#!/bin/sh
+# chezmoi-hound-act - the two things a count of dotfile drift makes you want to
+# do, behind the panel's two buttons.
+#
+#   chezmoi-hound-act commit [--source DIR]
+#       capture the edits this machine has made to managed targets into the
+#       source, commit them, and commit whatever else the source repo's own
+#       working tree is holding
+#
+#   chezmoi-hound-act push [--source DIR] [git push args]
+#       push the commits the remote has not seen
+#
+# Both are button presses, so neither prompts. Neither is dangerous in the way
+# that would need one: a commit is local and reversible (the previous HEAD is in
+# the reflog and nothing has been pushed), and the push only ever goes to the
+# branch's existing upstream. This script never force-pushes, never changes a
+# remote, never deletes anything, and never touches a branch other than the
+# checked-out one.
+#
+# It prints a short log, which the panel shows. It does not refresh the badge:
+# the widget re-runs its own check when this exits.
+#
+#   chezmoi-hound-act push --dry-run    proves a push would work, without pushing
+
+set -u
+
+SRC=""
+action=""
+dry=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        commit|push)
+            [ -n "$action" ] || action="$1"
+            shift
+            ;;
+        --source)
+            SRC="${2:-}"
+            shift 2
+            ;;
+        --dry-run)
+            dry="--dry-run"
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$action" ]; then
+    echo "usage: chezmoi-hound-act commit | push [--source DIR] [--dry-run]"
+    exit 0
+fi
+
+command -v chezmoi >/dev/null 2>&1 || { echo "chezmoi-hound-act: chezmoi is not on PATH"; exit 0; }
+command -v git >/dev/null 2>&1 || { echo "chezmoi-hound-act: git is not on PATH"; exit 0; }
+
+# Same resolution as the check script: an explicit source wins, otherwise ask
+# chezmoi which source it is configured for.
+if [ -n "$SRC" ]; then
+    srcdir=$SRC
+else
+    srcdir=$(chezmoi source-path 2>/dev/null) || srcdir=""
+    [ -n "$srcdir" ] || srcdir="$HOME/.local/share/chezmoi"
+fi
+
+if [ ! -d "$srcdir/.git" ]; then
+    echo "chezmoi-hound-act: no source repository at $srcdir"
+    exit 0
+fi
+
+chez() {
+    if [ -n "$SRC" ]; then
+        chezmoi --source "$SRC" "$@"
+    else
+        chezmoi "$@"
+    fi
+}
+
+gitrepo() { git -C "$srcdir" "$@"; }
+
+# One action at a time. A second click while the first is still running would
+# capture a half-committed tree, or race a second push at the same ref.
+lockdir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/chezmoi-hound"
+mkdir -p "$lockdir" 2>/dev/null || lockdir="${TMPDIR:-/tmp}"
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$lockdir/act.lock" || exit 0
+    flock -n 9 || { echo "another Chezmoi Hound action is already running"; exit 0; }
+fi
+
+case "$action" in
+    commit)
+        work=$(mktemp -d "${TMPDIR:-/tmp}/chezmoi-hound-act.XXXXXX") || exit 0
+        trap 'rm -rf "$work"' EXIT INT TERM
+        : >"$work/captured"
+        : >"$work/left"
+        captured=0
+
+        # chezmoi status, one drifting target at a time. The count is read again
+        # here rather than trusted from the badge, because the badge may be a few
+        # minutes old and this is the run that changes the tree.
+        chez status 2>/dev/null >"$work/status"
+
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            [ "${#line}" -ge 4 ] || continue
+            col=$(printf '%s' "$line" | cut -c2)
+            case "$col" in
+                ' '|'R') continue ;;   # in sync, or a run script that is only due
+            esac
+            path=${line#?? }
+            [ -n "$path" ] || continue
+
+            case "$col" in
+                'M'|'A') ;;                        # edited / added here: capture it
+                *)
+                    # A deletion, or anything else: removing the source because
+                    # the live file vanished is a judgement call, not a button.
+                    printf 'left alone, needs you: %s\n' "$path" >>"$work/left"
+                    continue
+                    ;;
+            esac
+
+            # A *templated* source must never be overwritten with the rendered
+            # output: re-adding dot_config/foo.tmpl would stop it being a template
+            # and freeze whatever this machine happens to have today. That needs a
+            # human and the template's variables, so it is reported, not captured.
+            src=$(chez source-path "$HOME/$path" 2>/dev/null) || src=""
+            case "$src" in
+                *.tmpl)
+                    printf 'left alone, it is a template: %s\n' "$path" >>"$work/left"
+                    continue
+                    ;;
+            esac
+
+            if chez add "$HOME/$path" >/dev/null 2>&1; then
+                printf 'captured: %s\n' "$path" >>"$work/captured"
+                captured=$((captured + 1))
+            else
+                printf 'could not capture: %s\n' "$path" >>"$work/left"
+            fi
+        done <"$work/status"
+
+        # The source repo's own tracked edits, e.g. a hook edited in the repo but
+        # not yet in $HOME. `-u` is deliberate: it commits changes to files git
+        # already knows about and cannot sweep in a stray untracked file the way
+        # `-A` would.
+        gitrepo add -u >/dev/null 2>&1 || true
+
+        if gitrepo diff --cached --quiet 2>/dev/null; then
+            echo "nothing to commit: the source already matches \$HOME"
+        else
+            printf 'staged %s file(s)\n' "$(gitrepo diff --cached --name-only | grep -c . )"
+            if gitrepo commit -q -m "Capture dotfiles drift from $(hostname -s) on $(date +%F)"; then
+                printf 'committed %s\n' "$(gitrepo log -1 --format='%h %s')"
+                printf 'now %s commit(s) ahead of the remote\n' \
+                    "$(gitrepo rev-list --count '@{u}..HEAD' 2>/dev/null || printf '?')"
+                echo "-> the count includes them now; push when you are ready"
+            else
+                echo "commit failed; nothing was pushed and the index is still staged"
+            fi
+        fi
+
+        cat "$work/captured" "$work/left" 2>/dev/null
+        [ "$captured" -gt 0 ] && printf '%s target(s) captured\n' "$captured"
+        ;;
+
+    push)
+        upstream=$(gitrepo rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || upstream=""
+        if [ -z "$upstream" ]; then
+            printf 'no upstream: %s has no branch to push to\n' \
+                "$(gitrepo rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+            exit 0
+        fi
+
+        ahead=$(gitrepo rev-list --count '@{u}..HEAD' 2>/dev/null) || ahead=0
+        if [ "$ahead" -eq 0 ]; then
+            printf '%s already has every commit\n' "$upstream"
+            exit 0
+        fi
+
+        printf 'pushing %s commit(s) to %s\n' "$ahead" "$upstream"
+        if gitrepo push $dry; then
+            if [ -n "$dry" ]; then
+                echo "dry run: the push would have been accepted"
+            else
+                printf 'pushed: %s is up to date\n' "$upstream"
+            fi
+        else
+            echo "push failed - the remote did not accept it"
+        fi
+        ;;
+
+    *)
+        echo "usage: chezmoi-hound-act commit | push [--source DIR] [--dry-run]"
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,4 @@
+# Nothing generated, nothing local. The plugin is the whole repo.
+*.swp
+.DS_Store
+__pycache__/

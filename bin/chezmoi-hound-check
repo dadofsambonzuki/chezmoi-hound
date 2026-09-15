@@ -1,0 +1,188 @@
+#!/bin/sh
+# chezmoi-hound-check - how far this machine's dotfiles have drifted.
+#
+# One number, made of three independent parts:
+#
+#   home      managed targets this machine has edited and the source has not
+#             captured yet (chezmoi status, second column)
+#   repo      paths the source repo's own working tree is holding uncommitted
+#   unpushed  commits in the source repo the remote has not seen
+#
+# Nothing here fetches: a network round trip every few minutes to answer a
+# question about the local checkout is not worth it, so "unpushed" means
+# "the remote has not been told", not "the remote agrees".
+#
+# Output is a line protocol, one record per line, "key<TAB>value", in any order,
+# so this stays a POSIX shell script with no jq and no JSON parser:
+#
+#   version 1
+#   stamp    <local date and time>
+#   source   <source directory>
+#   branch   <checked-out branch>
+#   upstream <upstream ref>          (absent when the branch has no upstream)
+#   home     <count>   repo <count>   unpushed <count>   total <count>
+#   file     <path>          a target that differs in $HOME      (up to --limit)
+#   commit   <sha> <subject> a commit the remote has not seen    (up to --limit)
+#   repofile <XY> <path>     an uncommitted path in the source   (up to --limit)
+#   note     <text>          something worth saying, not an error
+#   error    <text>          the reading is incomplete
+#
+# Exit 0 when the reading is complete, 1 when chezmoi or the source tree could
+# not be read at all (the records printed before that are still valid).
+#
+#   --source DIR   the chezmoi source directory, for a tree that is not the
+#                  configured one (the tree you otherwise pass to
+#                  `chezmoi --source DIR`)
+#   --limit N      cap on items listed per section (default 10)
+#   --render       print the reading as text instead, for a human to read
+
+set -u
+
+LIMIT=10
+SRC=""
+RENDER=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --source) SRC="${2:-}"; shift 2 ;;
+        --limit)  LIMIT="${2:-10}"; shift 2 ;;
+        --render) RENDER=1; shift ;;
+        *) shift ;;
+    esac
+done
+
+case "$LIMIT" in ''|*[!0-9]*) LIMIT=10 ;; esac
+
+fail() {
+    printf 'error\t%s\n' "$1"
+    exit 1
+}
+
+command -v chezmoi >/dev/null 2>&1 || fail "chezmoi is not on PATH"
+command -v git >/dev/null 2>&1 || fail "git is not on PATH"
+
+# One place that decides how chezmoi is invoked, so --source cannot be
+# remembered in one call and forgotten in the next.
+chez() {
+    if [ -n "$SRC" ]; then
+        chezmoi --source "$SRC" "$@"
+    else
+        chezmoi "$@"
+    fi
+}
+
+# The git work happens in the source tree. `chezmoi source-path` names the
+# source chezmoi is *configured* for, which is the wrong answer when we were
+# pointed at a tree explicitly, so an explicit --source wins.
+if [ -n "$SRC" ]; then
+    srcdir=$SRC
+else
+    srcdir=$(chezmoi source-path 2>/dev/null) || srcdir=""
+    [ -n "$srcdir" ] || srcdir="$HOME/.local/share/chezmoi"
+fi
+[ -d "$srcdir" ] || fail "no source directory at $srcdir"
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/chezmoi-hound.XXXXXX") || fail "cannot create a temporary directory"
+trap 'rm -rf "$work"' EXIT INT TERM
+
+# ---- 1. edited here, not captured -------------------------------------------
+# chezmoi status prints two state columns, then the path from column 4. The
+# second column compares the target against the source state, where 'R' marks a
+# run script that is merely due - a wrapper can be permanently due, and that is
+# not file drift. Anything else in that column is.
+home=0
+if chez status >"$work/status" 2>"$work/status.err"; then
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        [ "${#line}" -ge 4 ] || continue
+        col=$(printf '%s' "$line" | cut -c2)
+        [ "$col" = " " ] && continue
+        [ "$col" = "R" ] && continue
+        home=$((home + 1))
+        [ "$home" -le "$LIMIT" ] && printf 'file\t%s\n' "${line#?? }" >>"$work/files"
+    done <"$work/status"
+else
+    fail "chezmoi status failed: $(head -n 1 "$work/status.err" 2>/dev/null)"
+fi
+
+# ---- 2. the source repo's own working tree, 3. and what it has not pushed ---
+repo=0
+unpushed=0
+branch=""
+upstream=""
+
+if ! git -C "$srcdir" rev-parse --git-dir >/dev/null 2>&1; then
+    printf 'note\t%s\n' "$srcdir is not a git repository: only \$HOME drift is counted here"
+    printf 'version\t1\n'
+    printf 'stamp\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+    printf 'source\t%s\n' "$srcdir"
+    printf 'home\t%s\nrepo\t0\nunpushed\t0\ntotal\t%s\n' "$home" "$home"
+    [ -s "$work/files" ] && cat "$work/files"
+    exit 0
+fi
+
+git -C "$srcdir" status --porcelain >"$work/repo" 2>/dev/null || true
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    repo=$((repo + 1))
+    [ "$repo" -le "$LIMIT" ] && printf 'repofile\t%s\n' "$line" >>"$work/repofiles"
+done <"$work/repo"
+
+branch=$(git -C "$srcdir" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
+upstream=$(git -C "$srcdir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || upstream=""
+
+if [ -n "$upstream" ]; then
+    unpushed=$(git -C "$srcdir" rev-list --count '@{u}..HEAD' 2>/dev/null) || unpushed=0
+    git -C "$srcdir" log --format='%h %s' -n "$LIMIT" '@{u}..HEAD' 2>/dev/null |
+        while IFS= read -r c; do
+            [ -n "$c" ] && printf 'commit\t%s\n' "$c" >>"$work/commits"
+        done
+else
+    printf 'note\t%s has no upstream, so nothing can be reported as unpushed\n' "${branch:-the branch}" >"$work/notes"
+fi
+
+total=$((home + repo + unpushed))
+
+# ---- the reading -------------------------------------------------------------
+if [ "$RENDER" = 1 ]; then
+    printf 'Chezmoi Hound: %s item(s) drifting  ·  %s\n' "$total" "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf 'source: %s   branch: %s%s\n' "$srcdir" "${branch:-?}" "${upstream:+  ->  $upstream}"
+
+    if [ "$unpushed" -gt 0 ]; then
+        printf '\nCommits the remote has not seen (%s):\n' "$unpushed"
+        git -C "$srcdir" log --oneline --no-decorate '@{u}..HEAD' 2>/dev/null | sed 's/^/  /'
+        printf '  -> push them from the panel, or: git -C %s push\n' "$srcdir"
+    fi
+
+    if [ "$home" -gt 0 ]; then
+        printf '\nEdited here and not captured by the source (%s):\n' "$home"
+        sed 's/^file\t/  /' "$work/files" 2>/dev/null
+        printf '  -> capture them from the panel, or: chezmoi add <path>\n'
+    fi
+
+    if [ "$repo" -gt 0 ]; then
+        printf '\nUncommitted in the source repo itself (%s):\n' "$repo"
+        sed 's/^repofile\t/  /' "$work/repofiles" 2>/dev/null
+    fi
+
+    if [ "$total" -eq 0 ]; then
+        printf '\n$HOME, the source and the remote all agree. Nothing to do.\n'
+    fi
+
+    cat "$work/notes" 2>/dev/null | sed 's/^note\t/note: /'
+    exit 0
+fi
+
+printf 'version\t1\n'
+printf 'stamp\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+printf 'source\t%s\n' "$srcdir"
+printf 'branch\t%s\n' "$branch"
+[ -n "$upstream" ] && printf 'upstream\t%s\n' "$upstream"
+printf 'home\t%s\n' "$home"
+printf 'repo\t%s\n' "$repo"
+printf 'unpushed\t%s\n' "$unpushed"
+printf 'total\t%s\n' "$total"
+
+cat "$work/files" "$work/commits" "$work/repofiles" "$work/notes" 2>/dev/null
+
+exit 0
