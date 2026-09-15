@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.dadofsambonzuki.chezmoi-hound",
   "name": "Chezmoi Hound",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Nathan",
   "license": "MIT",
   "homepage": "https://github.com/dadofsambonzuki/chezmoi-hound",
@@ -28,7 +28,8 @@
     "defaults": {
       "sourceDir": "",
       "checkSeconds": 300,
-      "whenClean": "Hide"
+      "whenClean": "Hide",
+      "aiCommand": ""
     },
     "schema": [
       {
@@ -37,6 +38,13 @@
         "label": "chezmoi source directory",
         "defaultValue": "",
         "description": "Leave empty to use chezmoi's own configured source. Set it when the source is a tree you normally pass to `chezmoi --source`, such as ~/Projects/dotfiles."
+      },
+      {
+        "key": "aiCommand",
+        "type": "string",
+        "label": "AI command for commit messages",
+        "defaultValue": "",
+        "description": "Leave empty to use this machine's default coding agent, the one `omarchy default agent` reports. Supported for suggestions: hermes, claude, codex, gemini, opencode. Name one to force it instead, such as `codex`. Only used when the Suggest button is pressed."
       },
       {
         "key": "checkSeconds",

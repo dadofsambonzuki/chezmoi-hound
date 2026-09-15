@@ -2,7 +2,7 @@
 # chezmoi-hound-act - the two things a count of dotfile drift makes you want to
 # do, behind the panel's two buttons.
 #
-#   chezmoi-hound-act commit [--source DIR]
+#   chezmoi-hound-act commit [--source DIR] [--message TEXT | --message-file PATH]
 #       capture the edits this machine has made to managed targets into the
 #       source, commit them, and commit whatever else the source repo's own
 #       working tree is holding
@@ -10,15 +10,28 @@
 #   chezmoi-hound-act push [--source DIR] [git push args]
 #       push the commits the remote has not seen
 #
-# Both are button presses, so neither prompts. Neither is dangerous in the way
-# that would need one: a commit is local and reversible (the previous HEAD is in
-# the reflog and nothing has been pushed), and the push only ever goes to the
-# branch's existing upstream. This script never force-pushes, never changes a
-# remote, never deletes anything, and never touches a branch other than the
-# checked-out one.
+#   chezmoi-hound-act suggest [--source DIR] [--ai COMMAND] [--draft | --probe]
+#       print the message `commit` would use. --draft asks for the wording this
+#       script can always produce from the paths; --probe asks which AI command
+#       would be used ("ai=<command>" or "ai=none"); with neither flag it
+#       either flag it describes the drift to that agent and prints its sentence,
+#       falling back to the draft when there is no agent or it says nothing. The
+#       agent is this machine's default one (Omarchy's `omarchy default agent`),
+#       or whatever --ai names.
+#
+# The three actions are button presses, so none of them prompts. None is
+# dangerous in the way that would need one: a commit is local and reversible
+# (the previous HEAD is in the reflog and nothing has been pushed), and the push
+# only ever goes to the branch's existing upstream. This script never
+# force-pushes, never changes a remote, never deletes anything, and never
+# touches a branch other than the checked-out one.
 #
 # It prints a short log, which the panel shows. It does not refresh the badge:
 # the widget re-runs its own check when this exits.
+#
+# Nothing is sent anywhere on its own: the drift reaches an AI CLI only when a
+# person asks for a suggestion, and the CLI is their own, with their own
+# credentials and their own provider. This script never talks to a provider.
 #
 #   chezmoi-hound-act push --dry-run    proves a push would work, without pushing
 
@@ -27,10 +40,15 @@ set -u
 SRC=""
 action=""
 dry=""
+message=""
+messagefile=""
+ai=""
+draft=""
+probe=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        commit|push)
+        commit|push|suggest)
             [ -n "$action" ] || action="$1"
             shift
             ;;
@@ -42,6 +60,30 @@ while [ $# -gt 0 ]; do
             dry="--dry-run"
             shift
             ;;
+        -m|--message)
+            message="${2:-}"
+            shift 2
+            ;;
+        --message=*)
+            message="${1#--message=}"
+            shift
+            ;;
+        --message-file)
+            messagefile="${2:-}"
+            shift 2
+            ;;
+        --ai)
+            ai="${2:-}"
+            shift 2
+            ;;
+        --draft)
+            draft="yes"
+            shift
+            ;;
+        --probe)
+            probe="yes"
+            shift
+            ;;
         *)
             shift
             ;;
@@ -49,12 +91,15 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$action" ]; then
-    echo "usage: chezmoi-hound-act commit | push [--source DIR] [--dry-run]"
-    exit 0
+    echo "usage: chezmoi-hound-act commit | push | suggest [--source DIR] [--dry-run]"
+    exit 2
 fi
 
-command -v chezmoi >/dev/null 2>&1 || { echo "chezmoi-hound-act: chezmoi is not on PATH"; exit 0; }
-command -v git >/dev/null 2>&1 || { echo "chezmoi-hound-act: git is not on PATH"; exit 0; }
+# An action that cannot run at all must not end in a zero exit: the panel reads
+# the exit code, and a missing chezmoi reported as success is a lie the user
+# only discovers later.
+command -v chezmoi >/dev/null 2>&1 || { echo "chezmoi-hound-act: chezmoi is not on PATH"; exit 3; }
+command -v git >/dev/null 2>&1 || { echo "chezmoi-hound-act: git is not on PATH"; exit 3; }
 
 # Same resolution as the check script: an explicit source wins, otherwise ask
 # chezmoi which source it is configured for.
@@ -67,7 +112,7 @@ fi
 
 if [ ! -d "$srcdir/.git" ]; then
     echo "chezmoi-hound-act: no source repository at $srcdir"
-    exit 0
+    exit 3
 fi
 
 chez() {
@@ -81,15 +126,200 @@ chez() {
 gitrepo() { git -C "$srcdir" "$@"; }
 
 # One action at a time. A second click while the first is still running would
-# capture a half-committed tree, or race a second push at the same ref.
-lockdir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/chezmoi-hound"
-mkdir -p "$lockdir" 2>/dev/null || lockdir="${TMPDIR:-/tmp}"
-if command -v flock >/dev/null 2>&1; then
-    exec 9>"$lockdir/act.lock" || exit 0
-    flock -n 9 || { echo "another Chezmoi Hound action is already running"; exit 0; }
+# capture a half-committed tree, or race a second push at the same ref. A
+# suggestion is read-only, so it is not held up by whatever is running.
+if [ "$action" != "suggest" ] && command -v flock >/dev/null 2>&1; then
+    lockdir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/chezmoi-hound"
+    mkdir -p "$lockdir" 2>/dev/null || lockdir="${TMPDIR:-/tmp}"
+    exec 9>"$lockdir/act.lock" || exit 3
+    flock -n 9 || { echo "another Chezmoi Hound action is already running"; exit 2; }
 fi
 
+# ---- commit messages -------------------------------------------------------
+#
+# Nothing down here reaches an AI unless a person asks for it: `suggest` is the
+# only path that calls one, and the panel only calls it from its suggestion
+# button. The CLI is the user's own, with the user's own credentials.
+
+# The wording a machine can always produce: what changed, where, and when. The
+# panel prefills its entry with this, so pressing commit without typing anything
+# still leaves a message that says something.
+draft_message() {
+    printf 'Capture dotfiles drift from %s on %s\n' \
+        "$(hostname -s 2>/dev/null || echo this-machine)" "$(date +%F)"
+    paths=$(
+        {
+            chez status 2>/dev/null | sed -n 's/^...//p'
+            gitrepo status --porcelain 2>/dev/null | sed 's/^...//'
+        } | sort -u | head -12
+    )
+    [ -n "$paths" ] || return 0
+    printf '\n'
+    printf '%s\n' "$paths" | sed 's/^/- /'
+}
+
+paths_now() {
+    {
+        chez status 2>/dev/null | sed -n 's/^...//p'
+        gitrepo status --porcelain 2>/dev/null | sed 's/^...//'
+    } | sort -u | head -20
+}
+
+# What the commit would capture, in enough detail to describe it: which paths
+# drifted, then the change itself, capped. A commit message needs the shape of
+# the change, not every line of it.
+drift_preview() {
+    {
+        chez status 2>/dev/null | sed -n 's/^...//p' | sed 's/^/edited here: /'
+        gitrepo status --porcelain 2>/dev/null | sed 's/^/in the repo: /'
+        printf '\n'
+        { chez diff 2>/dev/null; gitrepo diff HEAD 2>/dev/null; } | head -c 12000
+    }
+}
+
+# The agent this machine uses. Omarchy keeps that choice in one place - its menu
+# sets it, `omarchy agent` launches it - so the plugin asks rather than carrying
+# a preference order of its own, which would fight the user's own choice.
+default_agent() {
+    if command -v omarchy-default-agent >/dev/null 2>&1; then
+        omarchy-default-agent 2>/dev/null
+        return 0
+    fi
+    if [ -r "$HOME/.config/omarchy/defaults/agent" ]; then
+        head -1 "$HOME/.config/omarchy/defaults/agent"
+    fi
+}
+
+# Omarchy's agent name mapped onto that agent's own *non-interactive* mode. A
+# button press cannot open a terminal UI, so this deliberately differs from the
+# interactive command `omarchy agent` launches. An agent not listed here gets no
+# suggestion: a button that hangs is worse than no button.
+ai_one_shot() {
+    case "$1" in
+        claude | claude-code)   printf 'claude' ;;
+        codex)                  printf 'codex' ;;
+        gemini | gemini-cli)    printf 'gemini' ;;
+        opencode | open-code)   printf 'opencode' ;;
+        hermes | hermes-agent)  printf 'hermes' ;;
+        *)                      printf '' ;;
+    esac
+}
+
+# Which agent should write the message, or nothing at all. --ai (the widget's
+# setting) and $HOUND_AI override everything, for pinning one agent or testing.
+ai_command() {
+    if [ -n "$ai" ]; then printf '%s' "$ai"; return 0; fi
+    if [ -n "${HOUND_AI:-}" ]; then printf '%s' "$HOUND_AI"; return 0; fi
+    agent=$(default_agent)
+    [ -n "$agent" ] || return 0
+    cli=$(ai_one_shot "$agent")
+    [ -n "$cli" ] || return 0
+    command -v "$cli" >/dev/null 2>&1 || return 0
+    printf '%s' "$cli"
+}
+
+ai_prompt() {
+    printf '%s\n' \
+        'Write the git commit message for the dotfiles change below.' \
+        'Reply with the message only: one subject line, 72 characters at most,' \
+        'imperative mood, no trailing full stop. Add a blank line and at most two' \
+        'short bullets only if the change has genuinely separate parts.' \
+        'Plain text, no preamble, no explanation, no code fences, no quotes.'
+}
+
+# One-shot invocations only: an interactive agent behind a button press would
+# hang until the timeout. $1 is the command, $2 a file holding the instructions
+# and the changed paths, $3 a file holding the drift itself. The CLIs that read
+# stdin get the drift there, the ones that do not get it in the prompt, and a
+# custom command gets both on stdin.
+ai_run() {
+    case "$1" in
+        claude)   timeout -k 2 90 claude -p "$(cat "$2")" <"$3" ;;
+        codex)    timeout -k 2 120 codex exec --skip-git-repo-check "$(cat "$2")" <"$3" ;;
+        gemini)   timeout -k 2 90 gemini -p "$(cat "$2")" <"$3" ;;
+        opencode) timeout -k 2 120 opencode run "$(cat "$2")
+
+$(head -c 12000 "$3")" ;;
+        hermes)   timeout -k 2 120 env -u HERMES_SESSION_SOURCE hermes -z "$(cat "$2")
+
+$(head -c 12000 "$3")" ;;
+        *)        { cat "$2"; printf '\nChanges:\n'; head -c 12000 "$3"; } \
+                      | timeout -k 2 120 sh -c "$1" ;;
+    esac
+}
+
+# Whatever the CLI answers, this has to end up a commit message: no fences, no
+# label, no surrounding quotes, a bounded number of lines. An agent that replies
+# with a paragraph about what it did must not reach the repository history.
+clean_message() {
+    sed -E -e 's/^[[:space:]]*```[a-zA-Z]*[[:space:]]*$//' \
+           -e 's/^[[:space:]]*```[[:space:]]*$//' \
+           -e 's/^[[:space:]]*(commit message|Commit message|message|Message|subject|Subject):[[:space:]]*//' \
+           -e 's/^[[:space:]]*"(.*)"[[:space:]]*$/\1/' \
+           -e 's/[[:space:]]*$//' |
+        sed -e '/./,$!d' | cut -c 1-140 | head -6
+}
+
 case "$action" in
+    suggest)
+        if [ -n "$probe" ]; then
+            cli=$(ai_command)
+            if [ -n "$cli" ]; then printf 'ai=%s\n' "$cli"; else printf 'ai=none\n'; fi
+            exit 0
+        fi
+
+        cli=""
+        [ -n "$draft" ] || cli=$(ai_command)
+        if [ -z "$cli" ]; then
+            # Tell the panel what it is looking at, so a sentence in the entry is
+            # never credited to an AI that did not write it.
+            printf 'HOUND-SUGGEST draft\n' >&2
+            draft_message
+            exit 0
+        fi
+
+        work=$(mktemp -d "${TMPDIR:-/tmp}/chezmoi-hound-suggest.XXXXXX") || exit 3
+        trap 'rm -rf "$work"' EXIT INT TERM
+        drift_preview >"$work/drift" 2>/dev/null
+        {
+            ai_prompt
+            printf '\nChanged paths:\n'
+            paths_now | sed 's/^/- /'
+        } >"$work/brief" 2>/dev/null
+        [ -s "$work/brief" ] || exit 3
+
+        # A CLI that is missing, unauthenticated, slow or silent must not cost
+        # the user the entry: anything short of a usable message falls back to
+        # the wording that always works. The exit status is checked first - an
+        # agent that is not logged in announces it on stdout, and unchecked that
+        # sentence becomes a commit message in the user's history.
+        candidate=""
+        # The AI runs inside the chezmoi source: that is the tree being described,
+        # and agent CLIs tend to refuse a directory they do not recognise (codex
+        # will not run outside a trusted repo at all).
+        ai_dir="$HOME"
+        [ -n "$SRC" ] && [ -d "$SRC" ] && ai_dir="$SRC"
+        ai_status=0
+        if ( cd "$ai_dir" 2>/dev/null && ai_run "$cli" "$work/brief" "$work/drift" >"$work/answer" ) 2>"$work/err"; then
+            candidate=$(clean_message <"$work/answer")
+        else
+            ai_status=$?
+        fi
+        first=$(printf '%s' "$candidate" | head -1)
+        case "$first" in
+            *"not logged in"*|*"Not logged in"*|*"please log in"*|*"Please log in"*|*"run /login"*|*"Run /login"*|*"command not found"*|*"API key"*|*"api key"*|*Unauthorized*|*unauthorized*)
+                candidate=""
+                ;;
+        esac
+        if [ -z "$candidate" ]; then
+            printf 'HOUND-SUGGEST failed=%s status=%s\n' "$cli" "$ai_status" >&2
+            draft_message
+            exit 0
+        fi
+        printf 'HOUND-SUGGEST ai=%s\n' "$cli" >&2
+        printf '%s\n' "$candidate"
+        ;;
+
     commit)
         work=$(mktemp -d "${TMPDIR:-/tmp}/chezmoi-hound-act.XXXXXX") || exit 0
         trap 'rm -rf "$work"' EXIT INT TERM
@@ -152,7 +382,17 @@ case "$action" in
             echo "nothing to commit: the source already matches \$HOME"
         else
             printf 'staged %s file(s)\n' "$(gitrepo diff --cached --name-only | grep -c . )"
-            if gitrepo commit -q -m "Capture dotfiles drift from $(hostname -s) on $(date +%F)"; then
+            # The panel's entry, a file when a shell made quoting awkward, or
+            # the wording that needs no thought at all. -F - keeps whatever line
+            # breaks the message has.
+            if [ -z "$message" ] && [ -n "$messagefile" ]; then
+                message=$(head -c 65536 "$messagefile" 2>/dev/null) || message=""
+            fi
+            case "$message" in
+                *[![:space:]]*) ;;
+                *) message=$(draft_message) ;;
+            esac
+            if printf '%s\n' "$message" | gitrepo commit -q -F -; then
                 printf 'committed %s\n' "$(gitrepo log -1 --format='%h %s')"
                 printf 'now %s commit(s) ahead of the remote\n' \
                     "$(gitrepo rev-list --count '@{u}..HEAD' 2>/dev/null || printf '?')"
@@ -195,7 +435,7 @@ case "$action" in
         ;;
 
     *)
-        echo "usage: chezmoi-hound-act commit | push [--source DIR] [--dry-run]"
+        echo "usage: chezmoi-hound-act commit | push | suggest [--source DIR] [--dry-run] [--message TEXT] [--ai COMMAND]"
         exit 2
         ;;
 esac

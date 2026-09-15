@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.1.0
+
+- **Capture and commit** now opens a commit message entry instead of committing
+  wording nobody chose. It arrives prefilled with the wording the script
+  generates (what drifted, where, and when), so an empty entry still commits
+  something that says something. Nothing is committed until the button is
+  pressed.
+- **Suggest with <agent>** writes the message from the diff, using the machine's
+  default coding agent — the one `omarchy default agent` reports, whatever it is
+  — through that agent's own non-interactive mode. An agent with no such mode
+  gets no button rather than a button that hangs, and the `aiCommand` setting
+  pins a different one.
+- The line under the entry says where the wording came from: a suggestion is
+  credited to the agent that wrote it, generated wording is never credited to an
+  agent that did not write it, and a failed suggestion says so with its exit
+  code.
+- A suggestion cannot push: the push stays a separate, separately-pressed action.
+- `suggest --probe` lets anything else ask which agent would be used
+  (`ai=<command>` or `ai=none`), and the panel exposes `suggest` and
+  `commitWith` over its IPC target.
+
 ## 1.0.0
 
 First release.

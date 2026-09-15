@@ -66,6 +66,7 @@ layout in `~/.config/omarchy/shell.json`, which Omarchy writes itself.
 | **chezmoi source directory** | *(empty)* | Empty means "chezmoi's own configured source". Set it when the tree is one you pass to `chezmoi --source`. |
 | **Re-check every (seconds)** | `300` | How often the widget re-reads the drift. 60–3600; a lower value costs more `chezmoi status` runs, not more network — this plugin never fetches. |
 | **When everything is in sync** | `Hide` | Hide keeps a permanent zero off the bar. Show leaves the count visible always. |
+| **AI command for commit messages** | *(empty)* | Empty uses this machine's default coding agent — the one `omarchy default agent` reports. Set it to pin one agent (say `codex`), or to use a command of your own. |
 
 ## Using it
 
@@ -75,7 +76,8 @@ layout in `~/.config/omarchy/shell.json`, which Omarchy writes itself.
 | Middle-click | Re-checks now, without waiting for the interval |
 | Right-click | Opens a floating terminal with the full text |
 | **Push N commits** | `git push` on the branch's existing upstream — nothing else |
-| **Capture and commit** | `chezmoi add` each edited target, then one local commit |
+| **Capture and commit** | opens a **commit message** entry, prefilled with the generated wording, then `chezmoi add` each edited target and one local commit |
+| **Suggest** | asks your default agent to write the message from the diff. Only shown when an agent can answer it, and only ever called by that button |
 
 The action buttons only appear when there is something for them to do.
 
@@ -87,13 +89,32 @@ Every monitor shows the same count. There is one bar surface per screen, so the
 widget runs once per monitor; finishing an action on one screen tells the others
 to re-check, instead of leaving them on the count from before it.
 
+### The commit message
+
+**Capture and commit** opens a message entry rather than committing wording you
+did not choose. Opening it commits nothing: it arrives prefilled with what the
+script can always work out — what drifted, and when — so committing without
+typing anything is still a valid way through.
+
+![The commit message entry](./docs/entry.png)
+
+**Suggest with <agent>** asks your default agent to write the message from the
+diff.
+
+![A suggested commit message](./docs/suggest.png)
+
+The line under the entry says which of the two you are reading: a suggestion is
+credited to the agent that wrote it, and the generated wording is never credited
+to an agent that did not. Nothing leaves the machine unless you press **Suggest**.
+
 ### What a commit and a push will and will not do
 
 - **Commit** captures targets whose state is `M` (modified here) or `A` (new
-  here), one `chezmoi add` each, then commits the source repo with
-  `Capture dotfiles drift from <host> on <date>`. It also commits tracked edits
-  already sitting in the source repo (`git add -u`) — never untracked stray
-  files.
+  here), one `chezmoi add` each, then commits the source repo with the message
+  in the entry. Leave the entry empty and you get the generated wording
+  (`Capture dotfiles drift from <host> on <date>`, then the paths). It also
+  commits tracked edits already sitting in the source repo (`git add -u`) —
+  never untracked stray files.
 - A target whose source is a **template** (`*.tmpl`) is reported and left alone.
   Re-adding a template would overwrite the template with this machine's rendered
   output and stop it being a template.
@@ -111,7 +132,7 @@ The plugin is two POSIX `sh` scripts plus one QML file:
 | --- | --- |
 | `BarWidget.qml` | the badge, the panel, and the clock that re-reads the drift |
 | `bin/chezmoi-hound-check` | reads the drift, prints it in a line protocol |
-| `bin/chezmoi-hound-act` | runs the two actions |
+| `bin/chezmoi-hound-act` | runs the actions, and writes the commit message |
 
 - The scripts are invoked directly, **not through a shell**, from the plugin's
   own directory — they are resolved relative to `BarWidget.qml`, so the plugin
@@ -122,6 +143,13 @@ The plugin is two POSIX `sh` scripts plus one QML file:
 - A malformed or failed reading leaves the previous number on screen and says why
   in the panel; it never empties the badge or invents a number.
 - A reading is refused outright unless the three counts add up to the total.
+- **Suggest** is the only part that runs anything beyond `chezmoi` and `git`: it
+  pipes the drift to your default agent's *non-interactive* mode — `hermes -z`,
+  `claude -p`, `codex exec`, `gemini -p`, `opencode run` — and does nothing at
+  all when your agent is not one of those. It runs inside your source directory,
+  under a timeout, and falls back to the generated wording if the agent says
+  nothing usable. It cannot commit anything: it fills the entry, and the commit
+  still needs the button.
 
 Read `bin/chezmoi-hound-check` and `bin/chezmoi-hound-act` — they are short, and
 the comments say why each rule exists.

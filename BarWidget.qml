@@ -49,6 +49,11 @@ Panel {
 
   readonly property bool showWhenClean: String(setting("whenClean", "Hide")) === "Show"
 
+  // The AI CLI that may write a commit message. Empty means "whichever one is
+  // installed and logged in here", which the act script resolves and reports
+  // back; naming one forces it, authenticated or not.
+  readonly property string aiCommand: String(setting("aiCommand", "")).replace(/^\s+|\s+$/g, "")
+
   // ---- the plugin's own scripts ------------------------------------------
   // Resolved next to this file, because a plugin that shells out to something
   // in one user's ~/.local/bin only works on the machine it was written on.
@@ -89,6 +94,18 @@ Panel {
   property string lastAction: ""
   // Set when a re-check is asked for while one is already running.
   property bool pendingRecheck: false
+
+  // ---- the commit message -------------------------------------------------
+  // A commit only says something if a person wrote it, so the button opens an
+  // entry rather than firing a commit with wording nobody chose. The entry
+  // arrives prefilled with the message the script can always generate, which is
+  // also what an empty field falls back to - so the fast path is still
+  // click, click.
+  property bool asking: false         // the message entry is open
+  property bool suggesting: false     // a suggestion call is in flight
+  property string aiCli: ""           // the CLI that can write one, "" for none
+  property string lastMessage: ""     // what the last commit was told to say
+  property string suggestHint: ""     // one line under the entry, on what it holds
 
   // -1 means "the record was there but was not a count", which is different
   // from 0 and must not be mistaken for a valid reading.
@@ -227,10 +244,14 @@ Panel {
     root.resultText = ""
     root.lastAction = what
     root.running = what
+    // A commit carries whatever the message entry was holding. A push never
+    // does: writing a commit message must not quietly become permission to
+    // publish it, which stays a separate thing to authorise.
+    var args = [what === "push" ? "push" : "commit"]
+    if (what !== "push" && root.lastMessage !== "") args.push("--message", root.lastMessage)
     // 180s: capturing a large tree can take a while, and a half-captured tree
     // abandoned by a timeout is worse than a slow button.
-    actionProc.command = withSource(["/usr/bin/timeout", "-k", "2", "180", root.actScript,
-                                     what === "push" ? "push" : "commit"])
+    actionProc.command = withSource(["/usr/bin/timeout", "-k", "2", "180", root.actScript].concat(args))
     actionProc.running = true
   }
 
@@ -245,6 +266,52 @@ Panel {
   // Run the last action again - the other half of a failure.
   function retry() {
     if (root.lastAction !== "") root.runAction(root.lastAction)
+  }
+
+  // ---- the message entry --------------------------------------------------
+
+  // What the commit button does before it commits: open the entry, put the
+  // generated wording in it, and hand the field the keyboard.
+  function askCommit() {
+    if (root.running !== "" || actionProc.running) return
+    root.asking = true
+    root.suggestHint = ""
+    if (!draftProc.running) {
+      draftProc.command = withSource([root.actScript, "suggest", "--draft"])
+      draftProc.running = true
+    }
+    messageField.forceActiveFocus()
+  }
+
+  function cancelCommit() {
+    root.asking = false
+    root.suggestHint = ""
+    messageField.text = ""
+  }
+
+  // Asking an AI for wording is its own button, so a suggestion is always
+  // something a person asked for: no keystroke of the entry sends the diff
+  // anywhere by itself.
+  function suggestMessage() {
+    if (suggestProc.running || root.aiCli === "" || root.running !== "") return
+    root.suggesting = true
+    root.suggestHint = "waiting for " + root.aiCli + "…"
+    var args = [root.actScript, "suggest"]
+    if (root.aiCommand !== "") args.push("--ai", root.aiCommand)
+    // 150s: a one-shot agent call is slow the first time and there is a timeout
+    // inside this one as well, so the button always comes back.
+    suggestProc.command = withSource(["/usr/bin/timeout", "-k", "2", "150"].concat(args))
+    suggestProc.running = true
+  }
+
+  // The commit itself: the field's text, or the generated wording when it is
+  // empty - the script makes the same fallback, so the two always agree.
+  function commitNow() {
+    if (root.running !== "" || actionProc.running) return
+    root.lastMessage = messageField.text
+    root.asking = false
+    root.suggestHint = ""
+    root.runAction("commit")
   }
 
   // There is one bar surface per monitor, so there is one of us per screen. An
@@ -420,6 +487,74 @@ Panel {
     }
   }
 
+  // ---- the message entry's three processes ---------------------------------
+  //
+  // Three questions, one script: is there anything here that could write a
+  // message, what wording needs no thought, and what would an AI write. Separate
+  // processes because they are separate questions, and only the last can take
+  // seconds.
+  Process {
+    id: probeProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var answer = String(text || "").trim()
+        var found = answer.match(/^ai=(.+)$/)
+        root.aiCli = found && found[1] !== "none" ? found[1] : ""
+      }
+    }
+    onExited: function (exitCode, exitStatus) {
+      if (exitCode !== 0) root.aiCli = ""
+    }
+  }
+
+  // The generated wording, prefilled into the entry so that an empty field and
+  // the script's own fallback say the same thing. Runs off the script's report
+  // of the drift, and the diff itself, so it is the one call here that touches
+  // the tree - read-only, like the check.
+  Process {
+    id: draftProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var answer = String(text || "").trim()
+        if (answer !== "" && messageField.text === "") messageField.text = answer
+      }
+    }
+  }
+
+  // The suggestion call. It reports on stderr which of the three things happened
+  // - a CLI wrote the message, no CLI is available here, or the CLI did not
+  // answer - so the line under the entry never credits an AI for wording it did
+  // not write.
+  Process {
+    id: suggestProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var answer = String(text || "").trim()
+        if (answer !== "") messageField.text = answer
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var marker = String(text || "")
+        var wrote = marker.match(/HOUND-SUGGEST ai=(.+)/)
+        var failed = marker.match(/HOUND-SUGGEST failed=(\S+)(?: status=(\S+))?/)
+        if (wrote) root.suggestHint = "Written by " + wrote[1].trim() + " - read it before committing."
+        else if (failed) root.suggestHint = failed[1] + " could not write one"
+                                                 + (failed[2] && failed[2] !== "0" ? " (exit " + failed[2] + ")" : "")
+                                                 + "; this is the generated wording."
+        else root.suggestHint = "No AI CLI is logged in here; this is the generated wording."
+      }
+    }
+    onExited: function (exitCode, exitStatus) {
+      root.suggesting = false
+      if (exitCode !== 0) root.suggestHint = "The suggestion run exited " + exitCode + "."
+    }
+  }
+
   // The panel: the shape of the drift, then the buttons that act on it, then
   // the log of the last action. Everything it shows comes from the cache, so
   // opening it costs nothing.
@@ -433,9 +568,31 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(420))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
+    // The one thing worth asking the filesystem when the panel opens: whether
+    // anything here could write the commit message. A couple of PATH lookups, so
+    // it runs every time, and a CLI logged in since is picked up without a
+    // restart. Closing forgets any half-typed message.
+    onOpenChanged: {
+      if (!open) {
+        root.asking = false
+        root.suggestHint = ""
+        messageField.text = ""
+        return
+      }
+      if (probeProc.running) return
+      var args = [root.actScript, "suggest", "--probe"]
+      if (root.aiCommand !== "") args.push("--ai", root.aiCommand)
+      probeProc.command = withSource(args)
+      probeProc.running = true
+    }
+
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // While the message field holds the keyboard this must stay out of the
+      // way: the catcher takes keys on Keys.BeforeItem, so Escape has to reach
+      // the field to cancel the entry and Return has to reach it to commit.
+      blocked: messageField.activeFocus
       onCloseRequested: root.close()
 
       Column {
@@ -541,7 +698,9 @@ Panel {
           }
 
           Button {
-            text: root.running === "commit" ? "Committing…" : "Capture and commit " + root.plural(root.homeCount, "change")
+            // The ellipsis is the promise: this opens the message, it does not
+            // commit on the spot.
+            text: root.running === "commit" ? "Committing…" : "Capture and commit " + root.plural(root.homeCount, "change") + "…"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
             fontSize: Style.font.bodySmall
@@ -549,7 +708,7 @@ Panel {
             verticalPadding: Style.spacing.controlPaddingY
             bordered: true
             opacity: root.running === "" ? 1 : 0.45
-            onClicked: root.runAction("commit")
+            onClicked: root.askCommit()
           }
         }
 
@@ -585,7 +744,7 @@ Panel {
           }
 
           Button {
-            text: root.running === "commit" ? "Committing…" : "Commit " + root.plural(root.repoCount, "repo change")
+            text: root.running === "commit" ? "Committing…" : "Commit " + root.plural(root.repoCount, "repo change") + "…"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
             fontSize: Style.font.bodySmall
@@ -593,7 +752,7 @@ Panel {
             verticalPadding: Style.spacing.controlPaddingY
             bordered: true
             opacity: root.running === "" ? 1 : 0.45
-            onClicked: root.runAction("commit")
+            onClicked: root.askCommit()
           }
         }
 
@@ -609,6 +768,88 @@ Panel {
           wrapMode: Text.WordWrap
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.bodySmall
+        }
+
+        // ---- the commit message ----
+        // A step in the commit, not a mode of the panel: it arrives holding the
+        // wording the script generates, so committing without typing is still
+        // two clicks, and it is the only place a suggestion can land.
+        Column {
+          width: parent.width
+          spacing: Style.space(8)
+          visible: root.asking
+
+          PanelSectionHeader {
+            text: "COMMIT MESSAGE"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+          }
+
+          TextField {
+            id: messageField
+            width: parent.width
+            placeholderText: "say what this commit does"
+            foreground: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            verticalPadding: Style.spacing.controlPaddingY
+            Keys.onReturnPressed: root.commitNow()
+            Keys.onEnterPressed: root.commitNow()
+            Keys.onEscapePressed: root.cancelCommit()
+          }
+
+          Row {
+            spacing: Style.space(8)
+            Button {
+              text: root.running === "commit" ? "Committing…" : "Commit"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              bordered: true
+              onClicked: root.commitNow()
+            }
+            // Only present when something could answer it: a button that can
+            // only fail is worse than no button.
+            Button {
+              visible: root.aiCli !== ""
+              text: root.suggesting ? "Asking " + root.aiCli + "…" : "Suggest with " + root.aiCli
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              bordered: true
+              opacity: root.suggesting ? 0.45 : 1
+              onClicked: root.suggestMessage()
+            }
+            Button {
+              text: "Cancel"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              bordered: true
+              onClicked: root.cancelCommit()
+            }
+          }
+
+          // Who wrote the sentence above, said plainly: a suggestion must not
+          // look hand-typed, and generated wording must not be credited to an
+          // AI that never answered.
+          Text {
+            width: parent.width
+            visible: root.suggestHint !== ""
+            textFormat: Text.PlainText
+            text: root.suggestHint
+            color: root.bar.foreground
+            opacity: 0.7
+            wrapMode: Text.WordWrap
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
         }
 
         // ---- what the last action did ----
@@ -737,8 +978,12 @@ Panel {
         + " branch=" + (root.branchName === "" ? "unset" : root.branchName)
         + " result=" + (root.result === "" ? "none" : root.result)
         + " lastAction=" + (root.lastAction === "" ? "none" : root.lastAction)
+        + " asking=" + root.asking + " ai=" + (root.aiCli === "" ? "none" : root.aiCli)
+        + " msgChars=" + root.lastMessage.length
         + " stamp=" + root.stamp
         + " text=" + root.countText() + " badgeW=" + Math.round(badge.width)
+        + " fieldChars=" + messageField.text.length
+        + " hint=" + (root.suggestHint === "" ? "none" : root.suggestHint)
     }
 
     // Where the widget actually is on screen, so its rendering can be checked
@@ -756,11 +1001,24 @@ Panel {
         + " commits=" + root.commits.length + " detail=" + root.detail.length
         + " repoDetail=" + root.repoDetail.length + " log=" + root.logLines.length
         + " canPush=" + (root.unpushed > 0) + " canCommit=" + (root.homeCount + root.repoCount > 0)
+        + " asking=" + root.asking + " ai=" + (root.aiCli === "" ? "none" : root.aiCli)
         + " query=" + panel.fittedContentWidth(Style.space(420))
         + "x" + panel.fittedContentHeight(column.implicitHeight)
     }
 
-    function commit(): void { root.runAction("commit") }
+    // The button and this do the same thing now: ask for the message first.
+    function commit(): void { root.askCommit() }
+    // The suggestion is a button too; this is the scriptable path to the same
+    // thing, for an agent or a keybind.
+    function suggest(): void { root.suggestMessage() }
+
+    // Commit with a message decided elsewhere, which is the same path the entry's
+    // Commit button takes: the message is what runAction hands the script.
+    function commitWith(message: string): void {
+      root.lastMessage = message
+      root.asking = false
+      root.runAction("commit")
+    }
     function push(): void { root.runAction("push") }
 
     function refresh(): void {
@@ -790,5 +1048,8 @@ Panel {
     detailProc.signal(15)
     checkProc.signal(15)
     actionProc.signal(15)
+    probeProc.signal(15)
+    draftProc.signal(15)
+    suggestProc.signal(15)
   }
 }
