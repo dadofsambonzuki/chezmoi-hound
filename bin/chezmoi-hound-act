@@ -159,6 +159,7 @@ case "$action" in
                 echo "-> the count includes them now; push when you are ready"
             else
                 echo "commit failed; nothing was pushed and the index is still staged"
+                exit 1
             fi
         fi
 
@@ -171,7 +172,7 @@ case "$action" in
         if [ -z "$upstream" ]; then
             printf 'no upstream: %s has no branch to push to\n' \
                 "$(gitrepo rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
-            exit 0
+            exit 1
         fi
 
         ahead=$(gitrepo rev-list --count '@{u}..HEAD' 2>/dev/null) || ahead=0
@@ -189,11 +190,13 @@ case "$action" in
             fi
         else
             echo "push failed - the remote did not accept it"
+            exit 1
         fi
         ;;
 
     *)
         echo "usage: chezmoi-hound-act commit | push [--source DIR] [--dry-run]"
+        exit 2
         ;;
 esac
 

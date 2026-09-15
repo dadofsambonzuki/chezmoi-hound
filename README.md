@@ -87,6 +87,14 @@ layout in `~/.config/omarchy/shell.json`, which Omarchy writes itself.
 
 The two action buttons only appear when there is something for them to do.
 
+When an action finishes, the panel says what happened rather than leaving you to
+read it out of the log: a success offers **Close**, and a failure shows what
+broke and offers **Retry**.
+
+Every monitor shows the same count. There is one bar surface per screen, so the
+widget runs once per monitor; finishing an action on one screen tells the others
+to re-check, instead of leaving them on the count from before it.
+
 ### What a commit and a push will and will not do
 
 - **Commit** captures targets whose state is `M` (modified here) or `A` (new
@@ -129,3 +137,17 @@ the comments say why each rule exists.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Implementation notes
+
+- Settings live inline on the widget's entry in `~/.config/omarchy/shell.json`.
+  Do not name a setting `type`, `exec` or `source`: the bar reads those three
+  keys as a *custom module* definition, and an entry carrying one stops being a
+  plugin widget at all — the bar goes looking for a QML file or a command and
+  the widget silently never mounts. That is why the setting here is `sourceDir`.
+- The widget runs one instance per monitor, so anything that changes state has
+  to be published to the other instances (`bar.moduleWidgets()`) or the screens
+  disagree.
+- The counting and the git work are in `bin/`, not in QML: `chezmoi-hound-check`
+  answers in a line protocol (`key<TAB>value`) and `chezmoi-hound-act` does the
+  committing and pushing, with exit codes the panel can act on.

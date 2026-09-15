@@ -81,6 +81,14 @@ Panel {
   // interleaving, is how a half-captured tree gets committed.
   property string running: ""
   property var logLines: []
+  // The outcome of the last action as state, not log text: the panel says what
+  // happened and then offers the one thing that makes sense next - close it,
+  // or try again.
+  property string result: ""          // "" | "ok" | "error"
+  property string resultText: ""
+  property string lastAction: ""
+  // Set when a re-check is asked for while one is already running.
+  property bool pendingRecheck: false
 
   // -1 means "the record was there but was not a count", which is different
   // from 0 and must not be mistaken for a valid reading.
@@ -215,6 +223,9 @@ Panel {
   function runAction(what) {
     if (actionProc.running || root.running !== "") return
     root.logLines = []
+    root.result = ""
+    root.resultText = ""
+    root.lastAction = what
     root.running = what
     // 180s: capturing a large tree can take a while, and a half-captured tree
     // abandoned by a timeout is worse than a slow button.
@@ -231,8 +242,46 @@ Panel {
     return out
   }
 
-  function refresh() {
-    if (checkProc.running) return
+  // Run the last action again - the other half of a failure.
+  function retry() {
+    if (root.lastAction !== "") root.runAction(root.lastAction)
+  }
+
+  // There is one bar surface per monitor, so there is one of us per screen. An
+  // action lands on the instance that was clicked; the others are told to
+  // re-check, or the other monitor keeps showing the count from before it.
+  function notifyPeers() {
+    var items = root.bar && typeof root.bar.moduleWidgets === "function"
+      ? root.bar.moduleWidgets(root.moduleName) : []
+    for (var i = 0; i < items.length; i++) {
+      if (items[i] && items[i] !== root && typeof items[i].syncFromPeer === "function")
+        items[i].syncFromPeer()
+    }
+  }
+
+  // A peer can be mid-check when the call lands; the flag makes it run the
+  // check again the moment the one in flight finishes, instead of leaving the
+  // other monitor showing the count from before the action.
+  function syncFromPeer() {
+    if (checkProc.running) {
+      root.pendingRecheck = true
+      return
+    }
+    root.refresh(false)
+  }
+
+  // `notify` is true only where the reading changed because of something the
+  // user did; the timer passes nothing, so a tick cannot ping-pong between
+  // monitors.
+  function refresh(notify) {
+    // Peers are told first and unconditionally: an action must never leave
+    // another monitor showing the count from before it, and a check of our own
+    // already in flight must not swallow that.
+    if (notify === true) notifyPeers()
+    if (checkProc.running) {
+      root.pendingRecheck = true
+      return
+    }
     checkProc.command = withSource(["/usr/bin/timeout", "-k", "2", "60", root.checkScript])
     checkProc.running = true
   }
@@ -320,6 +369,11 @@ Panel {
         var err = plain(String(checkErr.text || "").trim())
         root.problem = err !== "" ? err : "chezmoi-hound-check exited " + code
       }
+      // Someone asked for a fresh reading while this one was in flight.
+      if (root.pendingRecheck) {
+        root.pendingRecheck = false
+        root.refresh(false)
+      }
     }
   }
 
@@ -347,9 +401,22 @@ Panel {
     }
     onExited: function (exitCode, exitStatus) {
       root.running = ""
-      // Re-read, so the badge and this panel show the new counts immediately
-      // rather than at the next tick.
-      root.refresh()
+      // The outcome is stated rather than left in the log to be inferred from:
+      // success says so and offers to close, failure says what broke and
+      // offers to try again.
+      var tail = root.logLines.length > 0
+        ? String(root.logLines[root.logLines.length - 1]).trim() : ""
+      if (exitCode === 0) {
+        root.result = "ok"
+        root.resultText = tail !== "" ? tail
+          : (root.lastAction === "push" ? "Pushed." : "Captured and committed.")
+      } else {
+        root.result = "error"
+        root.resultText = tail !== "" ? tail : "the action exited " + exitCode
+      }
+      // Re-read now rather than at the next tick, and tell the other monitors'
+      // badges to do the same.
+      root.refresh(true)
     }
   }
 
@@ -380,7 +447,7 @@ Panel {
 
         PanelHero {
           width: parent.width
-          title: "Dotfiles"
+          title: "Chezmoi Hound"
           meta: root.heroPhrase()
           detail: root.repoPhrase()
           foreground: root.bar.foreground
@@ -571,6 +638,51 @@ Panel {
           }
         }
 
+        // ---- how the last action ended ----
+        Column {
+          width: parent.width
+          spacing: Style.space(8)
+          visible: root.result !== ""
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            text: root.result === "ok" ? root.resultText : "Failed: " + root.resultText
+            color: root.bar.foreground
+            opacity: root.result === "ok" ? 0.85 : 1
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Row {
+            spacing: Style.space(8)
+
+            Button {
+              visible: root.result === "error"
+              text: "Retry"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              bordered: true
+              onClicked: root.retry()
+            }
+
+            Button {
+              text: "Close"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              bordered: true
+              onClicked: root.close()
+            }
+          }
+        }
+
         PanelSeparator {
           foreground: root.bar.foreground
         }
@@ -623,6 +735,8 @@ Panel {
         + " problem=" + (root.problem === "" ? "none" : root.problem)
         + " source=" + (root.sourceDir !== "" ? root.sourceDir : (root.reportedSource === "" ? "unset" : root.reportedSource))
         + " branch=" + (root.branchName === "" ? "unset" : root.branchName)
+        + " result=" + (root.result === "" ? "none" : root.result)
+        + " lastAction=" + (root.lastAction === "" ? "none" : root.lastAction)
         + " stamp=" + root.stamp
         + " text=" + root.countText() + " badgeW=" + Math.round(badge.width)
     }
