@@ -83,8 +83,6 @@ When an action finishes, the panel says what happened rather than leaving you to
 read it out of the log: a success offers **Close**, and a failure shows what
 broke and offers **Retry**.
 
-![The panel after a failed push](./docs/outcome.png)
-
 Every monitor shows the same count. There is one bar surface per screen, so the
 widget runs once per monitor; finishing an action on one screen tells the others
 to re-check, instead of leaving them on the count from before it.
