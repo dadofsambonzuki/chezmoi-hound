@@ -76,7 +76,7 @@ layout in `~/.config/omarchy/shell.json`, which Omarchy writes itself.
 | Middle-click | Re-checks now, without waiting for the interval |
 | Right-click | Opens a floating terminal with the full text |
 | **Push N commits** | `git push` on the branch's existing upstream — nothing else |
-| **Capture and commit** | opens a **commit message** entry, prefilled with the generated wording, then `chezmoi add` each edited target and one local commit |
+| **Capture and commit** | opens a **blank commit message** entry, then `chezmoi add` each edited target and one local commit |
 | **Suggest** | asks your default agent to write the message from the diff. Only shown when an agent can answer it, and only ever called by that button |
 | **undo** arrow on a commit row | takes that commit back, after asking: it repeats the row and says what taking it back means for it |
 
@@ -103,27 +103,22 @@ to re-check, instead of leaving them on the count from before it.
 ### The commit message
 
 **Capture and commit** opens a message entry rather than committing wording you
-did not choose. Opening it commits nothing: it arrives prefilled with what the
-script can always work out — what drifted, and when — so committing without
-typing anything is still a valid way through.
-
-![The commit message entry](./docs/entry.png)
+did not choose. Opening it commits nothing, and the entry arrives blank: nothing
+is written for you, and pressing **Commit** on an empty entry writes a commit
+with no message at all, which the panel says under the entry beforehand.
 
 **Suggest with <agent>** asks your default agent to write the message from the
 diff.
 
-![A suggested commit message](./docs/suggest.png)
-
-The line under the entry says which of the two you are reading: a suggestion is
-credited to the agent that wrote it, and the generated wording is never credited
-to an agent that did not. Nothing leaves the machine unless you press **Suggest**.
+The line under the entry says what came back: a suggestion is credited to the
+agent that wrote it, and a run that produced nothing usable says so and leaves
+the entry as you left it. Nothing leaves the machine unless you press **Suggest**.
 
 ### What a commit and a push will and will not do
 
 - **Commit** captures targets whose state is `M` (modified here) or `A` (new
   here), one `chezmoi add` each, then commits the source repo with the message
-  in the entry. Leave the entry empty and you get the generated wording
-  (`Capture dotfiles drift from <host> on <date>`, then the paths). It also
+  in the entry. Leave the entry empty and the commit carries no message. It also
   commits tracked edits already sitting in the source repo (`git add -u`) —
   never untracked stray files.
 - A target whose source is a **template** (`*.tmpl`) is reported and left alone.
@@ -149,8 +144,9 @@ The plugin is two POSIX `sh` scripts plus one QML file:
   own directory — they are resolved relative to `BarWidget.qml`, so the plugin
   works from wherever it was installed.
 - They run `chezmoi status`, `chezmoi source-path`, `chezmoi add`, and plain
-  `git` inside your source repo. Nothing else. No `sudo`, no network, no
-  `eval`, no writes outside the source repo.
+  `git` inside your source repo. Nothing else: nothing runs with escalated
+  privileges, nothing touches the network, there is no `eval`, and nothing is
+  written outside the source repo.
 - A malformed or failed reading leaves the previous number on screen and says why
   in the panel; it never empties the badge or invents a number.
 - A reading is refused outright unless the three counts add up to the total.
@@ -158,8 +154,8 @@ The plugin is two POSIX `sh` scripts plus one QML file:
   pipes the drift to your default agent's *non-interactive* mode — `hermes -z`,
   `claude -p`, `codex exec`, `gemini -p`, `opencode run` — and does nothing at
   all when your agent is not one of those. It runs inside your source directory,
-  under a timeout, and falls back to the generated wording if the agent says
-  nothing usable. It cannot commit anything: it fills the entry, and the commit
+  under a timeout, and if the agent answers with nothing usable the entry stays
+  as you left it. It cannot commit anything: it fills the entry, and the commit
   still needs the button.
 
 Read `bin/chezmoi-hound-check` and `bin/chezmoi-hound-act` — they are short, and
