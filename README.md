@@ -1,29 +1,19 @@
 # Chezmoi Hound
 
-A bar count of **dotfile drift** that hunts it down.
+An [Omarchy](https://omarchy.org/) plugin that sniffs out **Dotfile Drift** and helps you stay synced. **Woof!**
+
+Chezmoi Hound monitors for dotfile drift via [Chezmoi](https://www.chezmoi.io/) and pops one number in the
+Omarchy bar representing:
+
+ - _home_: managed targets this machine has edited and the source has not captured
+ - _repo_: paths the source repo's own working tree is holding uncommitted
+ - _unpushed_: commits in the source repo the remote has not seen
+
+The number on the bar = home + repo + unpushed.
 
 ![Chezmoi Hound](./preview.png)
 
-Chezmoi Hound adds up three different kinds of drift into one number in the
-Omarchy bar, and when you click that number it names the items and offers the two
-things a count of drift makes you want to do: **push** what the remote has not
-seen, and **capture and commit** what this machine has edited.
-
-```
-  home      managed targets this machine has edited and the source has not captured
-  repo      paths the source repo's own working tree is holding uncommitted
-  unpushed  commits in the source repo the remote has not seen
-
-  total = home + repo + unpushed          <- the number on the bar
-```
-
-![Chezmoi Hound's panel: the count, the drifting items, and the two actions](preview.png)
-
-- The badge is only ever a number. No glyph, no icon, nothing to misread.
-- It is **silent when everything agrees** — a permanent `0` on the bar is noise.
-- The panel names the drift, section by section, with the commits and paths
-  involved, so the number is never a mystery.
-- Nothing is captured or pushed without your click. See [What it runs](#what-it-runs).
+Clicking the number shows you a list of the drifted files and/or local commits, enabling you to commit the drift and/or push the changes. Omarchy Hound can also use your local AI agent to author the commit message based on the scope of the change.
 
 ## Install
 
@@ -87,7 +77,7 @@ layout in `~/.config/omarchy/shell.json`, which Omarchy writes itself.
 | **Push N commits** | `git push` on the branch's existing upstream — nothing else |
 | **Capture and commit** | `chezmoi add` each edited target, then one local commit |
 
-The two action buttons only appear when there is something for them to do.
+The action buttons only appear when there is something for them to do.
 
 When an action finishes, the panel says what happened rather than leaving you to
 read it out of the log: a success offers **Close**, and a failure shows what
