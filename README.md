@@ -11,7 +11,7 @@ Omarchy bar representing:
 
 The number on the bar = home + repo + unpushed.
 
-<img src="docs/panel.png" width="50%" alt="The Chezmoi Hound panel: the Dotfile Drift section, the latest commits, and the actions in the foot">
+<img src="preview.png" width="50%" alt="The Chezmoi Hound panel: the Dotfile Drift section, the latest commits, and the actions in the foot">
 
 Clicking the number shows you a list of the drifted files and/or local commits, enabling you to commit the drift and/or push the changes. Omarchy Hound can also use your local AI agent to author the commit message based on the scope of the change.
 
