@@ -3,6 +3,9 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+// Qualified, and only for the multi-line entry: an unqualified
+// QtQuick.Controls import would shadow the kit's own Button and TextField.
+import QtQuick.Controls as QQC
 
 // Chezmoi Hound - a count of dotfile drift, and the two things it makes you
 // want to do about it.
@@ -49,10 +52,19 @@ Panel {
 
   readonly property bool showWhenClean: String(setting("whenClean", "Hide")) === "Show"
 
+  // Section titles. The shared PanelSectionHeader is bold already - what made
+  // these read weakly was its default colour, dimmed 1.4x to sit under a hero
+  // this panel no longer has, which left a title the same grey as the rows it
+  // introduces. They take the full-strength foreground here.
+  readonly property color sectionTitleColor: root.bar.foreground
+
   // The AI CLI that may write a commit message. Empty means "whichever one is
   // installed and logged in here", which the act script resolves and reports
   // back; naming one forces it, authenticated or not.
   readonly property string aiCommand: String(setting("aiCommand", "")).replace(/^\s+|\s+$/g, "")
+  // The button's name has to match the command that will actually run, whether
+  // that came from this panel's own field or from `omarchy bar set` outside it.
+  onAiCommandChanged: root.probeAi()
 
   // ---- the plugin's own scripts ------------------------------------------
   // Resolved next to this file, because a plugin that shells out to something
@@ -72,6 +84,7 @@ Panel {
   property var detail: []
   property var commits: []
   property var repoDetail: []
+  property var recentCommits: []      // "<sha>  <subject>", newest first
   property var notes: []
   property string stamp: ""
   property string reportedSource: ""
@@ -98,14 +111,24 @@ Panel {
   // ---- the commit message -------------------------------------------------
   // A commit only says something if a person wrote it, so the button opens an
   // entry rather than firing a commit with wording nobody chose. The entry
-  // arrives prefilled with the message the script can always generate, which is
-  // also what an empty field falls back to - so the fast path is still
-  // click, click.
+  // arrives empty and stays that way unless someone types in it or asks an agent
+  // to write it: nothing the script can work out on its own is offered as a
+  // substitute message.
   property bool asking: false         // the message entry is open
+  // Which drift section that entry is open in: "home" for what was edited here,
+  // "repo" for what is uncommitted in the source tree. One entry, and it lives
+  // in the section whose button asked for it.
+  property string askWhere: "home"
   property bool suggesting: false     // a suggestion call is in flight
   property string aiCli: ""           // the CLI that can write one, "" for none
   property string lastMessage: ""     // what the last commit was told to say
+  // The undo confirm. `undoRow` is what is on screen and is dropped the moment
+  // the confirm is pressed; `undoSha` is what the script is told, and outlives it
+  // so that retry re-runs the same commit rather than an empty one.
+  property string undoRow: ""
+  property string undoSha: ""
   property string suggestHint: ""     // one line under the entry, on what it holds
+  property bool settingsOpen: false   // the widget's own options are showing
 
   // -1 means "the record was there but was not a count", which is different
   // from 0 and must not be mistaken for a valid reading.
@@ -123,7 +146,7 @@ Panel {
 
     var lines = text.split("\n")
     var home = -1, repo = -1, unpushed = -1, total = -1
-    var detail = [], commits = [], repoDetail = [], notes = []
+    var detail = [], commits = [], repoDetail = [], notes = [], recent = []
     var src = "", branch = "", upstream = "", stamp = "", problem = ""
 
     for (var i = 0; i < lines.length; i++) {
@@ -140,6 +163,14 @@ Panel {
       else if (key === "file") { if (detail.length < 8) detail.push(plain(value)) }
       else if (key === "commit") { if (commits.length < 8) commits.push(plain(value)) }
       else if (key === "repofile") { if (repoDetail.length < 8) repoDetail.push(plain(value)) }
+      else if (key === "recent") {
+        // One record, three tabs: <sha> <when> <subject>.
+        var parts = value.split("\t")
+        if (recent.length < 20 && parts.length >= 3)
+          // sha, then subject. No age: it padded the one column you are
+          // least likely to be reading, and --render still prints it.
+          recent.push(plain(parts[0] + "  " + parts[2]))
+      }
       else if (key === "note") { if (notes.length < 4) notes.push(plain(value)) }
       else if (key === "error") problem = plain(value)
       else if (key === "source") src = plain(value)
@@ -165,6 +196,7 @@ Panel {
     root.detail = detail
     root.commits = commits
     root.repoDetail = repoDetail
+    root.recentCommits = recent
     root.notes = notes
     root.reportedSource = src
     root.branchName = branch
@@ -215,22 +247,51 @@ Panel {
     return String(root.total)
   }
 
-  function heroPhrase() {
-    if (root.running !== "") return root.running === "push" ? "pushing…" : "capturing and committing…"
-    if (root.problem !== "") return "Cannot read the dotfiles"
-    if (root.total === 0) return root.everLoaded ? "In sync" : "Reading…"
-    var parts = []
-    if (root.homeCount > 0) parts.push(root.plural(root.homeCount, "edit") + " not captured")
-    if (root.repoCount > 0) parts.push(root.plural(root.repoCount, "repo change") + " uncommitted")
-    if (root.unpushed > 0) parts.push(root.plural(root.unpushed, "commit") + " not pushed")
-    return parts.join("  ·  ")
+  // A divider with nothing on one side of it is a stray line, not a divider.
+  function commitsDividerShown() {
+    if (root.recentCommits.length === 0 && root.unpushed === 0) return false
+    return root.problem !== "" || root.notes.length > 0
+        || root.homeCount > 0 || root.repoCount > 0 || root.total === 0
   }
 
-  function repoPhrase() {
-    var where = root.sourceDir !== "" ? root.sourceDir : (root.reportedSource !== "" ? root.reportedSource : "chezmoi's default source")
-    if (root.branchName !== "") where += "  ·  " + root.branchName
-    return where
-      + (root.stamp ? "\nchecked " + root.stamp : "")
+  // The history's heading. Its count is only ever the part of the history the
+  // remote has not seen - the rows speak for themselves, and a total next to
+  // an unfixed number was two counts doing one job.
+  function commitsTitle() {
+    if (root.unpushed <= 0) return "LATEST COMMITS"
+    return "LATEST COMMITS \u2014 " + root.plural(root.unpushed, "commit") + " not pushed"
+  }
+
+  // The full text in a floating terminal. The badge's right-click and the
+  // panel's button both come here, because detailProc does nothing until its
+  // command is set: assigning `running` on a Process with no command starts
+  // nothing, which is exactly what the panel's button used to do.
+  function showDetails() {
+    if (detailProc.running) return
+    detailProc.command = withSource(["/usr/bin/omarchy-launch-floating-terminal-with-presentation",
+                                     root.checkScript, "--render"])
+    detailProc.running = true
+  }
+
+  // One option, written back into this widget's entry in the bar layout. The
+  // running shell does it in process; `omarchy bar set` is the same write from
+  // outside, kept for the moment the shell API is not there to be called.
+  function saveSetting(key, value) {
+    var entry = { id: root.moduleName }
+    for (var existing in root.settings) if (existing !== "id") entry[existing] = root.settings[existing]
+    entry[key] = value
+    root.settings = entry
+    // The button names the agent that will answer it, so replacing that setting
+    // re-probes now instead of waiting for the next panel open: the button is the
+    // status, and one naming the CLI you just replaced is worse than none.
+    if (key === "aiCommand") root.probeAi(value)
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function") {
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
+      return
+    }
+    if (saveProc.running) return
+    saveProc.command = ["omarchy", "bar", "set", root.moduleName, key, String(value)]
+    saveProc.running = true
   }
 
   // ---- actions ------------------------------------------------------------
@@ -247,8 +308,16 @@ Panel {
     // A commit carries whatever the message entry was holding. A push never
     // does: writing a commit message must not quietly become permission to
     // publish it, which stays a separate thing to authorise.
-    var args = [what === "push" ? "push" : "commit"]
-    if (what !== "push" && root.lastMessage !== "") args.push("--message", root.lastMessage)
+    var args
+    if (what === "push") {
+      args = ["push"]
+    } else if (what === "undo") {
+      // One commit, named by its own sha: never a range, never a reflog word.
+      args = ["undo", "--commit", root.undoSha]
+    } else {
+      args = ["commit"]
+      if (root.lastMessage !== "") args.push("--message", root.lastMessage)
+    }
     // 180s: capturing a large tree can take a while, and a half-captured tree
     // abandoned by a timeout is worse than a slow button.
     actionProc.command = withSource(["/usr/bin/timeout", "-k", "2", "180", root.actScript].concat(args))
@@ -268,18 +337,41 @@ Panel {
     if (root.lastAction !== "") root.runAction(root.lastAction)
   }
 
+  // ---- taking a commit back -----------------------------------------------
+  // The button only asks. Nothing moves until the confirm is pressed, because
+  // this is the one control here that changes what the history holds, and it is
+  // an icon: small enough to hit while reaching for something else.
+  function askUndo(row) {
+    if (root.running !== "" || actionProc.running) return
+    root.asking = false
+    root.undoRow = String(row).replace(/^\s+/, "")
+    root.undoSha = root.undoRow.split(/\s+/)[0]
+  }
+
+  function keepCommit() {
+    root.undoRow = ""
+    root.undoSha = ""
+  }
+
+  function runUndo() {
+    if (root.undoSha === "") return
+    root.undoRow = ""            // the confirm goes; the sha stays for retry
+    root.runAction("undo")
+  }
+
   // ---- the message entry --------------------------------------------------
 
-  // What the commit button does before it commits: open the entry, put the
-  // generated wording in it, and hand the field the keyboard.
-  function askCommit() {
+  // What the commit button does before it commits: open an empty entry and hand
+  // the field the keyboard. Nothing is worked out and filled in on the person's
+  // behalf - a message a script derived from the paths is not what they would
+  // have written, and it is theirs to write.
+  function askCommit(where) {
     if (root.running !== "" || actionProc.running) return
+    root.undoRow = ""
+    root.askWhere = where === "repo" ? "repo" : "home"
     root.asking = true
     root.suggestHint = ""
-    if (!draftProc.running) {
-      draftProc.command = withSource([root.actScript, "suggest", "--draft"])
-      draftProc.running = true
-    }
+    messageField.text = ""
     messageField.forceActiveFocus()
   }
 
@@ -289,13 +381,30 @@ Panel {
     messageField.text = ""
   }
 
+  // Which CLI could write a message. Asked of the script rather than guessed from
+  // the setting, because a command that is set but not installed must not put a
+  // button on screen that can only fail. Called when the panel opens, and again
+  // whenever that setting changes: the button carries this name as its status, so
+  // a button naming the CLI you just replaced is worse than no status at all.
+  function probeAi(aiOverride) {
+    if (probeProc.running) return
+    var ai = aiOverride === undefined ? root.aiCommand : String(aiOverride)
+    var args = [root.actScript, "suggest", "--probe"]
+    if (ai !== "") args.push("--ai", ai)
+    probeProc.command = withSource(args)
+    probeProc.running = true
+  }
+
   // Asking an AI for wording is its own button, so a suggestion is always
   // something a person asked for: no keystroke of the entry sends the diff
   // anywhere by itself.
   function suggestMessage() {
     if (suggestProc.running || root.aiCli === "" || root.running !== "") return
     root.suggesting = true
-    root.suggestHint = "waiting for " + root.aiCli + "…"
+    // In flight is the button's business - it already reads "Asking <cli>…".
+    // The line under the entry is for what came back (who wrote it, or why
+    // nobody did), so it stays empty until there is something to say.
+    root.suggestHint = ""
     var args = [root.actScript, "suggest"]
     if (root.aiCommand !== "") args.push("--ai", root.aiCommand)
     // 150s: a one-shot agent call is slow the first time and there is a timeout
@@ -304,8 +413,10 @@ Panel {
     suggestProc.running = true
   }
 
-  // The commit itself: the field's text, or the generated wording when it is
-  // empty - the script makes the same fallback, so the two always agree.
+  // The commit itself, carrying the field's text exactly as it reads. An empty
+  // entry commits with an empty message: the script passes
+  // --allow-empty-message, so the commit holds the blank the person left rather
+  // than words invented for them.
   function commitNow() {
     if (root.running !== "" || actionProc.running) return
     root.lastMessage = messageField.text
@@ -374,19 +485,26 @@ Panel {
     id: detailProc
   }
 
+  // Only used when the running shell cannot take the setting in process.
+  Process {
+    id: saveProc
+  }
+
   Row {
     id: badge
     anchors.centerIn: parent
-    opacity: root.total > 0 ? 1 : 0.5
 
     // Just the count. A Nerd Font glyph used to sit to its left; it was dropped
     // because the codepoint it used draws a barcode in this font, not a git
     // icon, and a bare number is clearer than a number with a puzzle next to it.
     Text {
+      id: badgeLabel
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: root.countText()
-      color: root.total > 0 ? Color.foreground : Color.muted
+      // One colour whether or not there is anything to report: a dimmed zero
+      // read as a different kind of number rather than as "nothing to do".
+      color: Color.foreground
       font.family: root.bar ? root.bar.fontFamily : Style.font.family
       font.pixelSize: Math.max(9, Math.round(root.barSize * 0.5))
       renderType: Text.NativeRendering
@@ -409,11 +527,7 @@ Panel {
       } else if (mouse.button === Qt.MiddleButton) {
         root.refresh()
       } else {
-        if (!detailProc.running) {
-          detailProc.command = withSource(["/usr/bin/omarchy-launch-floating-terminal-with-presentation",
-                                           root.checkScript, "--render"])
-          detailProc.running = true
-        }
+        root.showDetails()
       }
     }
     onEntered: if (root.bar && !root.opened) root.bar.showTooltip(root, root.tooltip())
@@ -475,8 +589,13 @@ Panel {
         ? String(root.logLines[root.logLines.length - 1]).trim() : ""
       if (exitCode === 0) {
         root.result = "ok"
-        root.resultText = tail !== "" ? tail
-          : (root.lastAction === "push" ? "Pushed." : "Captured and committed.")
+        // The panel's own voice, not the script's last log line. Echoing the tail
+        // used to read out "1 target(s) captured" - the script's summary of its
+        // work, not the outcome the panel means to state. The detail stays in the
+        // log, which Full details prints.
+        root.resultText = root.lastAction === "push" ? "Pushed."
+          : root.lastAction === "undo" ? "Undone."
+          : "Captured and committed."
       } else {
         root.result = "error"
         root.resultText = tail !== "" ? tail : "the action exited " + exitCode
@@ -489,10 +608,9 @@ Panel {
 
   // ---- the message entry's three processes ---------------------------------
   //
-  // Three questions, one script: is there anything here that could write a
-  // message, what wording needs no thought, and what would an AI write. Separate
-  // processes because they are separate questions, and only the last can take
-  // seconds.
+  // Two questions, one script: is there anything here that could write a message,
+  // and what would an AI write. Separate processes because they are separate
+  // questions, and only the last can take seconds.
   Process {
     id: probeProc
     stdout: StdioCollector {
@@ -508,25 +626,11 @@ Panel {
     }
   }
 
-  // The generated wording, prefilled into the entry so that an empty field and
-  // the script's own fallback say the same thing. Runs off the script's report
-  // of the drift, and the diff itself, so it is the one call here that touches
-  // the tree - read-only, like the check.
-  Process {
-    id: draftProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var answer = String(text || "").trim()
-        if (answer !== "" && messageField.text === "") messageField.text = answer
-      }
-    }
-  }
-
   // The suggestion call. It reports on stderr which of the three things happened
   // - a CLI wrote the message, no CLI is available here, or the CLI did not
   // answer - so the line under the entry never credits an AI for wording it did
-  // not write.
+  // not write, and a failed call is said out loud rather than papered over with
+  // a message the script made up.
   Process {
     id: suggestProc
     stdout: StdioCollector {
@@ -545,8 +649,8 @@ Panel {
         if (wrote) root.suggestHint = "Written by " + wrote[1].trim() + " - read it before committing."
         else if (failed) root.suggestHint = failed[1] + " could not write one"
                                                  + (failed[2] && failed[2] !== "0" ? " (exit " + failed[2] + ")" : "")
-                                                 + "; this is the generated wording."
-        else root.suggestHint = "No AI CLI is logged in here; this is the generated wording."
+                                                 + "; the entry is yours to fill."
+        else root.suggestHint = "No AI CLI here answered; the entry is yours to fill."
       }
     }
     onExited: function (exitCode, exitStatus) {
@@ -555,9 +659,9 @@ Panel {
     }
   }
 
-  // The panel: the shape of the drift, then the buttons that act on it, then
-  // the log of the last action. Everything it shows comes from the cache, so
-  // opening it costs nothing.
+  // The panel: the drift, then the commits, then the actions and this widget's
+  // own options. Everything it shows comes from the cache, so opening it costs
+  // nothing.
   KeyboardPanel {
     id: panel
     anchorItem: badge
@@ -577,13 +681,14 @@ Panel {
         root.asking = false
         root.suggestHint = ""
         messageField.text = ""
+        // An armed undo confirm is a question about a row that is no longer on
+        // screen, so closing drops it. The target stays: Retry is still the last
+        // action that ran.
+        root.undoRow = ""
         return
       }
       if (probeProc.running) return
-      var args = [root.actScript, "suggest", "--probe"]
-      if (root.aiCommand !== "") args.push("--ai", root.aiCommand)
-      probeProc.command = withSource(args)
-      probeProc.running = true
+      root.probeAi()
     }
 
     PanelKeyCatcher {
@@ -592,7 +697,8 @@ Panel {
       // While the message field holds the keyboard this must stay out of the
       // way: the catcher takes keys on Keys.BeforeItem, so Escape has to reach
       // the field to cancel the entry and Return has to reach it to commit.
-      blocked: messageField.activeFocus
+      blocked: messageField.activeFocus || sourceField.activeFocus
+               || checkField.field.activeFocus || aiField.activeFocus
       onCloseRequested: root.close()
 
       Column {
@@ -601,55 +707,6 @@ Panel {
         anchors.right: parent.right
         anchors.top: parent.top
         spacing: Style.space(12)
-
-        PanelHero {
-          width: parent.width
-          title: "Chezmoi Hound"
-          meta: root.heroPhrase()
-          detail: root.repoPhrase()
-          foreground: root.bar.foreground
-          fontFamily: root.bar.fontFamily
-          iconOpacity: root.total > 0 ? 1.0 : 0.5
-        }
-
-        // ---- what the remote has not seen ----
-        Column {
-          width: parent.width
-          spacing: Style.space(8)
-          visible: root.unpushed > 0
-
-          PanelSectionHeader {
-            text: "NOT PUSHED — " + root.plural(root.unpushed, "commit")
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-          }
-
-          Repeater {
-            model: root.commits
-            Text {
-              width: parent.width
-              textFormat: Text.PlainText
-              text: "  " + modelData
-              color: root.bar.foreground
-              opacity: 0.75
-              elide: Text.ElideRight
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-          }
-
-          Button {
-            text: root.running === "push" ? "Pushing…" : "Push " + root.plural(root.unpushed, "commit")
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            fontSize: Style.font.bodySmall
-            horizontalPadding: Style.spacing.controlPaddingX
-            verticalPadding: Style.spacing.controlPaddingY
-            bordered: true
-            opacity: root.running === "" ? 1 : 0.45
-            onClicked: root.runAction("push")
-          }
-        }
 
         // Whatever the reading could not do - no chezmoi, no source tree, a
         // git command that failed - is said plainly instead of leaving the
@@ -666,21 +723,27 @@ Panel {
           font.pixelSize: Style.font.bodySmall
         }
 
-        PanelSeparator {
-          visible: root.unpushed > 0 && (root.homeCount > 0 || root.repoCount > 0)
-          foreground: root.bar.foreground
-        }
-
-        // ---- edits made on this machine that the repo has not got ----
+        // ---- what the repo has not got -------------------------------------
+        // Two lists: what was edited on this machine and not captured, and what
+        // is uncommitted in the source tree itself.
         Column {
+          id: driftSection
           width: parent.width
           spacing: Style.space(8)
-          visible: root.homeCount > 0
+          // Always up, drift or none: the header is how the panel names the
+          // section, and with nothing in the list the line under it says so in
+          // words. It also has to stay up while its own entry is open, even when
+          // a re-check empties the list behind it - a section that vanishes
+          // mid-sentence takes the field with it.
 
           PanelSectionHeader {
-            text: "EDITED HERE, NOT CAPTURED — " + root.plural(root.homeCount, "file")
+            id: driftHeader
+            text: root.homeCount > 0
+              ? "DOTFILE DRIFT \u2014 " + root.plural(root.homeCount, "change")
+              : "DOTFILE DRIFT"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
+            color: root.sectionTitleColor
           }
 
           Repeater {
@@ -697,9 +760,26 @@ Panel {
             }
           }
 
+          Text {
+            id: driftNote
+            width: parent.width
+            visible: root.homeCount === 0
+            textFormat: Text.PlainText
+            text: root.everLoaded
+              ? "No drift detected — the files here match the source."
+              : "No reading yet — the first check is on its way."
+            color: root.bar.foreground
+            opacity: 0.7
+            wrapMode: Text.WordWrap
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
           Button {
-            // The ellipsis is the promise: this opens the message, it does not
-            // commit on the spot.
+            // Nothing to commit means no button: it is only ever the first half
+            // of a commit. The ellipsis is the promise that it opens the message
+            // rather than committing on the spot.
+            visible: root.homeCount > 0
             text: root.running === "commit" ? "Committing…" : "Capture and commit " + root.plural(root.homeCount, "change") + "…"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
@@ -708,7 +788,7 @@ Panel {
             verticalPadding: Style.spacing.controlPaddingY
             bordered: true
             opacity: root.running === "" ? 1 : 0.45
-            onClicked: root.askCommit()
+            onClicked: root.askCommit("home")
           }
         }
 
@@ -719,14 +799,17 @@ Panel {
 
         // ---- the repo's own working tree ----
         Column {
+          id: repoSection
           width: parent.width
           spacing: Style.space(8)
-          visible: root.repoCount > 0
+          // As above: the entry outlives the list it was opened against.
+          visible: root.repoCount > 0 || (root.asking && root.askWhere === "repo")
 
           PanelSectionHeader {
             text: "UNCOMMITTED IN THE REPO — " + root.plural(root.repoCount, "path")
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
+            color: root.sectionTitleColor
           }
 
           Repeater {
@@ -752,29 +835,153 @@ Panel {
             verticalPadding: Style.spacing.controlPaddingY
             bordered: true
             opacity: root.running === "" ? 1 : 0.45
-            onClicked: root.askCommit()
+            onClicked: root.askCommit("repo")
           }
         }
 
-        Text {
+
+        // The divider that used to open the panel, when a hero and a separate
+        // "not pushed" list lived above this point. With both gone it belongs
+        // between the drift and the history - and only when there is something
+        // on both sides of it.
+        PanelSeparator {
+          visible: root.commitsDividerShown()
+          foreground: root.bar.foreground
+        }
+
+        // ---- local commits --------------------------------------------------
+        // The history, and the push that follows from it. There is no separate
+        // "not pushed" list any more: those commits are the first rows of this
+        // one, and the heading counts them, so no sha can appear twice.
+        Column {
           width: parent.width
-          visible: root.total === 0
-          textFormat: Text.PlainText
-          text: root.everLoaded
-            ? "$HOME, the repo and the remote all agree. Nothing to do."
-            : "No reading yet — the first check is on its way."
-          color: root.bar.foreground
-          opacity: 0.7
-          wrapMode: Text.WordWrap
-          font.family: root.bar.fontFamily
-          font.pixelSize: Style.font.bodySmall
+          spacing: Style.space(8)
+          visible: root.recentCommits.length > 0 || root.unpushed > 0
+
+          PanelSectionHeader {
+            text: root.commitsTitle()
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            color: root.sectionTitleColor
+          }
+
+          Repeater {
+            model: root.recentCommits
+            Row {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                // The subject gives way to the ellipsis, never the sha: the sha is
+                // the half the undo button acts on.
+                width: parent.width - undoButton.width - parent.spacing
+                textFormat: Text.PlainText
+                text: "  " + modelData
+                color: root.bar.foreground
+                opacity: 0.75
+                elide: Text.ElideRight
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Button {
+                id: undoButton
+                iconText: "\uf0e2"
+                iconSize: Style.font.bodySmall
+                tooltipText: "Take this commit back"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                fontSize: Style.font.bodySmall
+                horizontalPadding: Style.space(4)
+                verticalPadding: Style.space(2)
+                onClicked: root.askUndo(modelData)
+              }
+            }
+          }
+
+          // What the button above promises, said plainly before it happens. The
+          // wording is not one sentence for both cases: whether the commit can
+          // leave the history at all depends on whether the remote has seen it.
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.undoRow !== ""
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "Take back " + root.undoRow + "?"
+              wrapMode: Text.WordWrap
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "Its changes come back to the working tree as drift. If this commit is not the newest, or the remote already has it, it keeps its place in the history and only its changes are undone."
+              wrapMode: Text.WordWrap
+              color: root.bar.foreground
+              opacity: 0.7
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Row {
+              spacing: Style.space(8)
+
+              Button {
+                text: root.running === "undo" ? "Taking it back…" : "Take it back"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                fontSize: Style.font.bodySmall
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
+                bordered: true
+                onClicked: root.runUndo()
+              }
+
+              Button {
+                text: "Keep it"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                fontSize: Style.font.bodySmall
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
+                bordered: true
+                onClicked: root.keepCommit()
+              }
+            }
+          }
+
+        Button {
+          id: pushButton
+          // Only when there is something to push. The rows above are a record of
+          // what is already committed, not a reason for the button.
+          visible: root.unpushed > 0
+          text: root.running === "push" ? "Pushing…" : "Push " + root.plural(root.unpushed, "commit")
+          foreground: root.bar.foreground
+          fontFamily: root.bar.fontFamily
+          fontSize: Style.font.bodySmall
+          horizontalPadding: Style.spacing.controlPaddingX
+          verticalPadding: Style.spacing.controlPaddingY
+          bordered: true
+          opacity: root.running === "" ? 1 : 0.45
+          onClicked: root.runAction("push")
+        }
         }
 
         // ---- the commit message ----
-        // A step in the commit, not a mode of the panel: it arrives holding the
-        // wording the script generates, so committing without typing is still
-        // two clicks, and it is the only place a suggestion can land.
+        // A step in the commit, not a mode of the panel: it arrives empty, and
+        // the only things that ever fill it are the person at the keyboard and a
+        // suggestion they asked for. It is the only place a suggestion lands.
         Column {
+          id: messageEntry
+          // Placed in the section that asked for it, so the entry arrives under
+          // the button and against the list it is about, instead of at the far
+          // end of the panel past the history.
+          parent: root.askWhere === "repo" ? repoSection : driftSection
           width: parent.width
           spacing: Style.space(8)
           visible: root.asking
@@ -783,19 +990,86 @@ Panel {
             text: "COMMIT MESSAGE"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
+            color: root.sectionTitleColor
           }
 
-          TextField {
-            id: messageField
+          // Two lines tall, and it scrolls inside itself when the message runs
+          // on longer than that: a commit can be a subject and a line of body,
+          // and the kit ships no multi-line field. The outer ScrollView is the
+          // box - it draws the kit's field border and fill and holds the
+          // scrollbar - and the TextArea inside it wears the kit's font and
+          // padding, so the pair reads as the single-line TextField this
+          // replaces, taller, rather than as two controls.
+          QQC.ScrollView {
+            id: messageBox
             width: parent.width
-            placeholderText: "say what this commit does"
-            foreground: root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            verticalPadding: Style.spacing.controlPaddingY
-            Keys.onReturnPressed: root.commitNow()
-            Keys.onEnterPressed: root.commitNow()
-            Keys.onEscapePressed: root.cancelCommit()
+            // Two lines, plus the field's own padding and border, so the box
+            // never grows with the text and the panel never becomes a wall of it.
+            height: 2 * messageField.lineHeight + messageField.topPadding + messageField.bottomPadding
+            clip: true
+            padding: 0
+
+            background: BorderSurface {
+              id: messageBorder
+              color: Style.controlFill(messageField.activeFocus, messageField.hovered, root.bar.foreground, Color.accent)
+              borderSpec: Border.controlSpec(messageField.activeFocus ? "focus" : (messageField.hovered ? "hover-cursor" : "normal"), root.bar.foreground, Color.accent)
+              radius: Style.cornerRadius
+            }
+
+            // There only when there is more to read than the two lines show.
+            QQC.ScrollBar.vertical: QQC.ScrollBar {
+              id: messageScroll
+              policy: QQC.ScrollBar.AsNeeded
+              width: 4
+              background: null
+              contentItem: Rectangle {
+                implicitWidth: 3
+                radius: 1.5
+                color: root.bar.foreground
+                opacity: 0.4
+              }
+            }
+            QQC.ScrollBar.horizontal.policy: QQC.ScrollBar.AlwaysOff
+
+            QQC.TextArea {
+              id: messageField
+              readonly property real lineHeight: Math.ceil(messageMetrics.height)
+
+              placeholderText: "say what this commit does"
+              wrapMode: TextEdit.Wrap
+              color: root.bar.foreground
+              selectionColor: Style.selectionFillFor(root.bar.foreground, Color.accent)
+              selectedTextColor: root.bar.foreground
+              placeholderTextColor: Qt.darker(root.bar.foreground, 1.6)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              leftPadding: Style.spacing.controlPaddingX + messageBorder.borderLeft
+              // The scrollbar's lane, reserved whether or not the bar is showing,
+              // so the text does not re-wrap the moment it appears.
+              rightPadding: Style.spacing.controlPaddingX + 4 + messageBorder.borderRight
+              topPadding: Style.spacing.controlPaddingY + messageBorder.borderTop
+              bottomPadding: Style.spacing.controlPaddingY + messageBorder.borderBottom
+
+              // Return still commits, as it did when this was one line; Shift or
+              // Ctrl is left to the field, which puts a newline in instead.
+              Keys.onReturnPressed: function (event) {
+                if (event.modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) event.accepted = false
+                else root.commitNow()
+              }
+              Keys.onEnterPressed: function (event) {
+                if (event.modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) event.accepted = false
+                else root.commitNow()
+              }
+              Keys.onEscapePressed: root.cancelCommit()
+            }
+          }
+
+          // The line height the two-line box is built from, taken from the field's
+          // own font rather than guessed at.
+          TextMetrics {
+            id: messageMetrics
+            font: messageField.font
+            text: "Mg"
           }
 
           Row {
@@ -837,8 +1111,8 @@ Panel {
           }
 
           // Who wrote the sentence above, said plainly: a suggestion must not
-          // look hand-typed, and generated wording must not be credited to an
-          // AI that never answered.
+          // look hand-typed, and a generation that failed must not be mistaken
+          // for one that came back empty-handed.
           Text {
             width: parent.width
             visible: root.suggestHint !== ""
@@ -850,32 +1124,20 @@ Panel {
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
           }
-        }
 
-        // ---- what the last action did ----
-        Column {
-          width: parent.width
-          spacing: Style.space(4)
-          visible: root.logLines.length > 0
-
-          PanelSectionHeader {
-            text: "LAST ACTION"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-          }
-
-          Repeater {
-            model: root.logLines
-            Text {
-              width: parent.width
-              textFormat: Text.PlainText
-              text: "  " + modelData
-              color: root.bar.foreground
-              opacity: 0.8
-              elide: Text.ElideRight
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
+          // What an empty entry does, said before the button is pressed rather
+          // than discovered in the log afterwards: the commit goes through with
+          // no message at all.
+          Text {
+            width: parent.width
+            visible: messageField.text === "" && root.suggestHint === ""
+            textFormat: Text.PlainText
+            text: "Blank - pressing Commit writes a commit with no message."
+            color: root.bar.foreground
+            opacity: 0.7
+            wrapMode: Text.WordWrap
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
           }
         }
 
@@ -896,30 +1158,125 @@ Panel {
             font.pixelSize: Style.font.bodySmall
           }
 
+          Button {
+            visible: root.result === "error"
+            text: "Retry"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            fontSize: Style.font.bodySmall
+            horizontalPadding: Style.spacing.controlPaddingX
+            verticalPadding: Style.spacing.controlPaddingY
+            bordered: true
+            onClicked: root.retry()
+          }
+        }
+
+        // ---- settings ------------------------------------------------------
+        // The shell sets a widget's options from the command line and draws no
+        // form for them, so the panel carries its own. Every change goes back
+        // into this widget's entry in the bar layout, which is why it survives
+        // a shell restart and is the same write `omarchy bar set` makes.
+        Column {
+          width: parent.width
+          spacing: Style.space(8)
+          visible: root.settingsOpen
+
+          PanelSectionHeader {
+            text: "SETTINGS"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            color: root.sectionTitleColor
+          }
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "chezmoi source directory"
+            color: root.bar.foreground
+            opacity: 0.6
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          TextField {
+            id: sourceField
+            width: parent.width
+            text: root.sourceDir
+            placeholderText: "empty: the source chezmoi itself is configured with"
+            foreground: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            verticalPadding: Style.spacing.controlPaddingY
+            Keys.onReturnPressed: root.saveSetting("sourceDir", sourceField.text)
+            Keys.onEnterPressed: root.saveSetting("sourceDir", sourceField.text)
+            onEditingFinished: root.saveSetting("sourceDir", sourceField.text)
+          }
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "check every, in seconds"
+            color: root.bar.foreground
+            opacity: 0.6
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          NumberField {
+            id: checkField
+            value: root.checkSeconds
+            from: 60
+            to: 3600
+            stepSize: 60
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            fontSize: Style.font.bodySmall
+            onModified: root.saveSetting("checkSeconds", value)
+          }
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "AI command a suggestion runs"
+            color: root.bar.foreground
+            opacity: 0.6
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          TextField {
+            id: aiField
+            width: parent.width
+            text: root.aiCommand
+            placeholderText: "Uses the default Omarchy agent unless overridden here."
+            foreground: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            verticalPadding: Style.spacing.controlPaddingY
+            Keys.onReturnPressed: root.saveSetting("aiCommand", aiField.text)
+            Keys.onEnterPressed: root.saveSetting("aiCommand", aiField.text)
+            onEditingFinished: root.saveSetting("aiCommand", aiField.text)
+          }
+
           Row {
+            width: parent.width
             spacing: Style.space(8)
 
-            Button {
-              visible: root.result === "error"
-              text: "Retry"
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              fontSize: Style.font.bodySmall
-              horizontalPadding: Style.spacing.controlPaddingX
-              verticalPadding: Style.spacing.controlPaddingY
-              bordered: true
-              onClicked: root.retry()
+            Text {
+              width: parent.width - showToggle.width - parent.spacing
+              text: "show the count when everything is clean"
+              color: root.bar.foreground
+              opacity: 0.6
+              elide: Text.ElideRight
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
             }
 
-            Button {
-              text: "Close"
+            ToggleSwitch {
+              id: showToggle
+              checked: root.showWhenClean
               foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              fontSize: Style.font.bodySmall
-              horizontalPadding: Style.spacing.controlPaddingX
-              verticalPadding: Style.spacing.controlPaddingY
-              bordered: true
-              onClicked: root.close()
+              onToggled: root.saveSetting("whenClean", root.showWhenClean ? "Hide" : "Show")
             }
           }
         }
@@ -951,8 +1308,33 @@ Panel {
             horizontalPadding: Style.spacing.controlPaddingX
             verticalPadding: Style.spacing.controlPaddingY
             bordered: true
-            onClicked: if (!detailProc.running) detailProc.running = true
+            onClicked: root.showDetails()
           }
+
+          Button {
+            text: root.settingsOpen ? "Hide settings" : "Settings"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            fontSize: Style.font.bodySmall
+            horizontalPadding: Style.spacing.controlPaddingX
+            verticalPadding: Style.spacing.controlPaddingY
+            bordered: true
+            onClicked: root.settingsOpen = !root.settingsOpen
+          }
+
+          // Last, and always in the same place: closing is not a comment on the
+          // last action, it is the way out of the panel.
+          Button {
+            text: "Close"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            fontSize: Style.font.bodySmall
+            horizontalPadding: Style.spacing.controlPaddingX
+            verticalPadding: Style.spacing.controlPaddingY
+            bordered: true
+            onClicked: root.close()
+          }
+
         }
       }
     }
@@ -978,12 +1360,25 @@ Panel {
         + " branch=" + (root.branchName === "" ? "unset" : root.branchName)
         + " result=" + (root.result === "" ? "none" : root.result)
         + " lastAction=" + (root.lastAction === "" ? "none" : root.lastAction)
-        + " asking=" + root.asking + " ai=" + (root.aiCli === "" ? "none" : root.aiCli)
+        + " asking=" + root.asking + " where=" + root.askWhere
+        + " ai=" + (root.aiCli === "" ? "none" : root.aiCli)
         + " msgChars=" + root.lastMessage.length
         + " stamp=" + root.stamp
         + " text=" + root.countText() + " badgeW=" + Math.round(badge.width)
+        + " settingsOpen=" + root.settingsOpen
         + " fieldChars=" + messageField.text.length
+        + " entryH=" + Math.round(messageBox.height) + " entryLine=" + messageField.lineHeight
+        + " undo=" + (root.undoRow === "" ? "none" : root.undoRow)
+        + " entryBar=" + (messageScroll.size < 1 ? "shown" : "hidden")
+        + " badgeText=" + root.countText()
+        + " badgeColor=" + badgeLabel.color.toString()
+        + " driftHeader=" + driftHeader.text
+        + " driftLine=" + (driftNote.visible ? "shown" : "hidden")
+        + " push=" + (pushButton.visible ? "shown" : "hidden")
         + " hint=" + (root.suggestHint === "" ? "none" : root.suggestHint)
+        + " commitsTitle=" + root.commitsTitle()
+        + " outcomeText=" + (root.resultText === "" ? "none" : root.resultText)
+        + " suggesting=" + root.suggesting
     }
 
     // Where the widget actually is on screen, so its rendering can be checked
@@ -1000,14 +1395,20 @@ Panel {
       return "opened=" + root.opened + " running=" + (root.running === "" ? "idle" : root.running)
         + " commits=" + root.commits.length + " detail=" + root.detail.length
         + " repoDetail=" + root.repoDetail.length + " log=" + root.logLines.length
+        + " recent=" + root.recentCommits.length
         + " canPush=" + (root.unpushed > 0) + " canCommit=" + (root.homeCount + root.repoCount > 0)
-        + " asking=" + root.asking + " ai=" + (root.aiCli === "" ? "none" : root.aiCli)
+        + " asking=" + root.asking + " where=" + root.askWhere
+        + " entryIn=" + (messageEntry.parent === repoSection ? "repo" : "drift")
+        + " ai=" + (root.aiCli === "" ? "none" : root.aiCli)
+        + " settingsOpen=" + root.settingsOpen
         + " query=" + panel.fittedContentWidth(Style.space(420))
         + "x" + panel.fittedContentHeight(column.implicitHeight)
     }
 
-    // The button and this do the same thing now: ask for the message first.
-    function commit(): void { root.askCommit() }
+    // The button and this do the same thing now: ask for the message first. The
+    // section is named, so the entry's other home can be exercised without a
+    // hand on the mouse: "repo" opens it under the repo's own button.
+    function commit(where: string): void { root.askCommit(where) }
     // The suggestion is a button too; this is the scriptable path to the same
     // thing, for an agent or a keybind.
     function suggest(): void { root.suggestMessage() }
@@ -1020,6 +1421,38 @@ Panel {
       root.runAction("commit")
     }
     function push(): void { root.runAction("push") }
+
+    // The undo button asks first, so these do too: `undo` arms the confirm the
+    // same way a press on the row does, and `undoNow` carries it through for a
+    // script or a keybind that has nobody to press the second button.
+    function undo(sha: string): void { root.askUndo(sha) }
+    function undoNow(sha: string): void {
+      root.askUndo(sha)
+      root.runUndo()
+    }
+
+    // Full details is a button; this is the scriptable path to the same
+    // floating terminal, so the read-out can be opened without a click.
+    function details(): void { root.showDetails() }
+
+    // The same write the panel's own fields make, so the path can be
+    // exercised without a hand on the mouse.
+    function settingsApply(key: string, value: string): void {
+      root.saveSetting(key, value)
+    }
+
+    // The settings view is a view, not a mode: this opens and closes it.
+    function settings(): string {
+      root.settingsOpen = !root.settingsOpen
+      return "settingsOpen=" + root.settingsOpen
+    }
+
+    // The same write the fields make, so an option can be set without typing
+    // into a field: settingsSet("checkSeconds", "300").
+    function settingsSet(key: string, value: string): string {
+      root.saveSetting(key, value)
+      return key + "=" + value
+    }
 
     function refresh(): void {
       root.refresh()
@@ -1049,7 +1482,7 @@ Panel {
     checkProc.signal(15)
     actionProc.signal(15)
     probeProc.signal(15)
-    draftProc.signal(15)
     suggestProc.signal(15)
+    saveProc.signal(15)
   }
 }

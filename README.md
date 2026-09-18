@@ -15,6 +15,8 @@ The number on the bar = home + repo + unpushed.
 
 Clicking the number shows you a list of the drifted files and/or local commits, enabling you to commit the drift and/or push the changes. Omarchy Hound can also use your local AI agent to author the commit message based on the scope of the change.
 
+<img src="docs/panel.png" width="50%" alt="The Chezmoi Hound panel: the Dotfile Drift section, the latest commits, and the actions in the foot">
+
 ## Install
 
 Omarchy 4 (Quattro) with the Omarchy shell:
@@ -65,7 +67,7 @@ layout in `~/.config/omarchy/shell.json`, which Omarchy writes itself.
 | --- | --- | --- |
 | **chezmoi source directory** | *(empty)* | Empty means "chezmoi's own configured source". Set it when the tree is one you pass to `chezmoi --source`. |
 | **Re-check every (seconds)** | `300` | How often the widget re-reads the drift. 60–3600; a lower value costs more `chezmoi status` runs, not more network — this plugin never fetches. |
-| **When everything is in sync** | `Hide` | Hide keeps a permanent zero off the bar. Show leaves the count visible always. |
+| **When everything is in sync** | `Hide` | Hide keeps a permanent zero off the bar. Show leaves the count visible always — a zero is drawn in the same colour as any other count, so it reads as a number rather than as a faded widget. |
 | **AI command for commit messages** | *(empty)* | Empty uses this machine's default coding agent — the one `omarchy default agent` reports. Set it to pin one agent (say `codex`), or to use a command of your own. |
 
 ## Using it
@@ -78,12 +80,23 @@ layout in `~/.config/omarchy/shell.json`, which Omarchy writes itself.
 | **Push N commits** | `git push` on the branch's existing upstream — nothing else |
 | **Capture and commit** | opens a **commit message** entry, prefilled with the generated wording, then `chezmoi add` each edited target and one local commit |
 | **Suggest** | asks your default agent to write the message from the diff. Only shown when an agent can answer it, and only ever called by that button |
+| **undo** arrow on a commit row | takes that commit back, after asking: it repeats the row and says what taking it back means for it |
 
-The action buttons only appear when there is something for them to do.
+The action buttons only appear when there is something for them to do: **Capture
+and commit** arrives with the drift it would capture, and **Push** only when the
+remote has not seen a commit. The commit rows above them record what is already
+committed; they are not a reason for the button.
+
+The panel keeps its shape whether or not there is anything to report. **Dotfile
+Drift** is always the first heading; with nothing to report it carries no count
+and says *No drift detected — the files here match the source.* in place of the
+list.
 
 When an action finishes, the panel says what happened rather than leaving you to
-read it out of the log: a success offers **Close**, and a failure shows what
-broke and offers **Retry**.
+read it out of the log: a failure shows what broke and offers **Retry**. **Close**
+is not part of the outcome — it is always the last button in the foot, after
+**Re-check now**, **Full details** and **Settings**, so the way out of the panel
+does not move depending on what just happened.
 
 Every monitor shows the same count. There is one bar surface per screen, so the
 widget runs once per monitor; finishing an action on one screen tells the others

@@ -12,6 +12,11 @@
 # question about the local checkout is not worth it, so "unpushed" means
 # "the remote has not been told", not "the remote agrees".
 #
+# The reading also carries the source repo's last five commits, newest first.
+# The panel shows those where it used to show the last action's own log: the
+# commit history is a fact about the dotfiles, the log was a fact about the last
+# button press, and only one of the two is worth a permanent row.
+#
 # Output is a line protocol, one record per line, "key<TAB>value", in any order,
 # so this stays a POSIX shell script with no jq and no JSON parser:
 #
@@ -24,6 +29,9 @@
 #   file     <path>          a target that differs in $HOME      (up to --limit)
 #   commit   <sha> <subject> a commit the remote has not seen    (up to --limit)
 #   repofile <XY> <path>     an uncommitted path in the source   (up to --limit)
+#   recent   <sha> <when> <subject>  commit in the source repo: the last five,
+#                                    or every commit the remote has not seen
+#                                    when there are more than five (ceiling 20)
 #   note     <text>          something worth saying, not an error
 #   error    <text>          the reading is incomplete
 #
@@ -141,6 +149,18 @@ else
     printf 'note\t%s has no upstream, so nothing can be reported as unpushed\n' "${branch:-the branch}" >"$work/notes"
 fi
 
+# ---- 4. where the repo has just been ---------------------------------------
+# Newest first. Five is the window, widened when the remote is further behind, so
+# that every commit the remote has not seen is a visible row rather than a number
+# in a button; twenty is the ceiling because this is a panel, not a pager. sed in
+# --render turns the tabs back into the columns a person reads.
+recent_n=$((unpushed > 5 ? unpushed : 5))
+[ "$recent_n" -gt 20 ] && recent_n=20
+git -C "$srcdir" log --format='%h%x09%cr%x09%s' -n "$recent_n" 2>/dev/null |
+    while IFS= read -r c; do
+        [ -n "$c" ] && printf 'recent\t%s\n' "$c" >>"$work/recent"
+    done
+
 total=$((home + repo + unpushed))
 
 # ---- the reading -------------------------------------------------------------
@@ -158,6 +178,11 @@ if [ "$RENDER" = 1 ]; then
         printf '\nEdited here and not captured by the source (%s):\n' "$home"
         sed 's/^file\t/  /' "$work/files" 2>/dev/null
         printf '  -> capture them from the panel, or: chezmoi add <path>\n'
+    fi
+
+    if [ -s "$work/recent" ]; then
+        printf '\nWhere the repo has just been:\n'
+        sed -e 's/^recent\t/  /' -e 's/\t/  /g' "$work/recent" 2>/dev/null
     fi
 
     if [ "$repo" -gt 0 ]; then
@@ -183,6 +208,6 @@ printf 'repo\t%s\n' "$repo"
 printf 'unpushed\t%s\n' "$unpushed"
 printf 'total\t%s\n' "$total"
 
-cat "$work/files" "$work/commits" "$work/repofiles" "$work/notes" 2>/dev/null
+cat "$work/files" "$work/commits" "$work/recent" "$work/repofiles" "$work/notes" 2>/dev/null
 
 exit 0

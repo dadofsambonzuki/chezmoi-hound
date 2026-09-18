@@ -5,26 +5,30 @@
 #   chezmoi-hound-act commit [--source DIR] [--message TEXT | --message-file PATH]
 #       capture the edits this machine has made to managed targets into the
 #       source, commit them, and commit whatever else the source repo's own
-#       working tree is holding
+#       working tree is holding. A target deleted here is dropped from the
+#       source as well (`chezmoi forget`), because `add` cannot express a
+#       deletion and the count would otherwise never come down.
 #
 #   chezmoi-hound-act push [--source DIR] [git push args]
 #       push the commits the remote has not seen
 #
-#   chezmoi-hound-act suggest [--source DIR] [--ai COMMAND] [--draft | --probe]
-#       print the message `commit` would use. --draft asks for the wording this
-#       script can always produce from the paths; --probe asks which AI command
-#       would be used ("ai=<command>" or "ai=none"); with neither flag it
-#       either flag it describes the drift to that agent and prints its sentence,
-#       falling back to the draft when there is no agent or it says nothing. The
-#       agent is this machine's default one (Omarchy's `omarchy default agent`),
-#       or whatever --ai names.
+#   chezmoi-hound-act suggest [--source DIR] [--ai COMMAND] [--probe]
+#       print the message `commit` would use: it describes the drift to an agent
+#       and prints the sentence the agent writes back. It prints nothing when
+#       there is no agent here, or when the agent says nothing usable - an entry
+#       the person fills in is worth more than wording a script invented, so
+#       there is no generated message to fall back to. --probe asks which AI
+#       command would be used ("ai=<command>" or "ai=none"). The agent is this
+#       machine's default one (Omarchy's `omarchy default agent`), or whatever
+#       --ai names.
 #
 # The three actions are button presses, so none of them prompts. None is
 # dangerous in the way that would need one: a commit is local and reversible
 # (the previous HEAD is in the reflog and nothing has been pushed), and the push
 # only ever goes to the branch's existing upstream. This script never
-# force-pushes, never changes a remote, never deletes anything, and never
-# touches a branch other than the checked-out one.
+# force-pushes, never changes a remote, never touches a branch other than the
+# checked-out one, and never deletes a file in $HOME: a target already gone from
+# here is only dropped from the source state, and git keeps the removed file.
 #
 # It prints a short log, which the panel shows. It does not refresh the badge:
 # the widget re-runs its own check when this exits.
@@ -34,6 +38,8 @@
 # credentials and their own provider. This script never talks to a provider.
 #
 #   chezmoi-hound-act push --dry-run    proves a push would work, without pushing
+#   chezmoi-hound-act undo --commit <sha>  takes one local commit back, leaving
+#                                        its changes in the working tree as drift
 
 set -u
 
@@ -43,14 +49,18 @@ dry=""
 message=""
 messagefile=""
 ai=""
-draft=""
 probe=""
+sha=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        commit|push|suggest)
+        commit|push|suggest|undo)
             [ -n "$action" ] || action="$1"
             shift
+            ;;
+        --commit)
+            sha="${2:-}"
+            shift 2
             ;;
         --source)
             SRC="${2:-}"
@@ -75,10 +85,6 @@ while [ $# -gt 0 ]; do
         --ai)
             ai="${2:-}"
             shift 2
-            ;;
-        --draft)
-            draft="yes"
-            shift
             ;;
         --probe)
             probe="yes"
@@ -137,30 +143,38 @@ fi
 
 # ---- commit messages -------------------------------------------------------
 #
+# The message belongs to the person: the panel opens an empty entry, and the only
+# two things that ever fill it are what they type and what an agent they asked
+# writes back. So there is nothing generated here to reach for. A list of the
+# paths a commit touches is not a message - a commit whose wording nobody chose
+# says less than a blank one, and a run script that is merely due is not even in
+# the commit the list would be describing.
+#
 # Nothing down here reaches an AI unless a person asks for it: `suggest` is the
 # only path that calls one, and the panel only calls it from its suggestion
 # button. The CLI is the user's own, with the user's own credentials.
 
-# The wording a machine can always produce: what changed, where, and when. The
-# panel prefills its entry with this, so pressing commit without typing anything
-# still leaves a message that says something.
-draft_message() {
-    printf 'Capture dotfiles drift from %s on %s\n' \
-        "$(hostname -s 2>/dev/null || echo this-machine)" "$(date +%F)"
-    paths=$(
-        {
-            chez status 2>/dev/null | sed -n 's/^...//p'
-            gitrepo status --porcelain 2>/dev/null | sed 's/^...//'
-        } | sort -u | head -12
-    )
-    [ -n "$paths" ] || return 0
-    printf '\n'
-    printf '%s\n' "$paths" | sed 's/^/- /'
+# The paths that have actually drifted in $HOME. `chezmoi status` prints two
+# state columns and then the path; the second column is 'R' for a run script that
+# is due, and a plain `run_` script is due on *every* status, forever. Left in,
+# those names are the first thing this machine's agent is told has changed - and
+# an agent briefed on the same two wrapper names every single time proposes the
+# same wrapper every single time. Nothing in $HOME differs for them, so they are
+# not drift. The check script filters by the same rule: keep the two in step.
+status_paths() {
+    chez status 2>/dev/null | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        [ "${#line}" -ge 4 ] || continue
+        case "$(printf '%s' "$line" | cut -c2)" in
+            ' '|'R') continue ;;
+        esac
+        printf '%s\n' "${line#?? }"
+    done
 }
 
 paths_now() {
     {
-        chez status 2>/dev/null | sed -n 's/^...//p'
+        status_paths
         gitrepo status --porcelain 2>/dev/null | sed 's/^...//'
     } | sort -u | head -20
 }
@@ -168,12 +182,18 @@ paths_now() {
 # What the commit would capture, in enough detail to describe it: which paths
 # drifted, then the change itself, capped. A commit message needs the shape of
 # the change, not every line of it.
+#
+# `chez diff -x scripts` on purpose. chezmoi reads a due run script as a new file
+# and prints its whole body, so an unfiltered diff hands this machine's agent the
+# complete text of every `run_` wrapper on every single request - which is how an
+# agent ends up proposing the wrapper it is reading. Scripts are not what this
+# commit captures; only what tooling needs to describe the files is here.
 drift_preview() {
     {
-        chez status 2>/dev/null | sed -n 's/^...//p' | sed 's/^/edited here: /'
+        status_paths | sed 's/^/edited here: /'
         gitrepo status --porcelain 2>/dev/null | sed 's/^/in the repo: /'
         printf '\n'
-        { chez diff 2>/dev/null; gitrepo diff HEAD 2>/dev/null; } | head -c 12000
+        { chez diff -x scripts 2>/dev/null; gitrepo diff HEAD 2>/dev/null; } | head -c 12000
     }
 }
 
@@ -268,13 +288,12 @@ case "$action" in
             exit 0
         fi
 
-        cli=""
-        [ -n "$draft" ] || cli=$(ai_command)
+        cli=$(ai_command)
         if [ -z "$cli" ]; then
-            # Tell the panel what it is looking at, so a sentence in the entry is
-            # never credited to an AI that did not write it.
-            printf 'HOUND-SUGGEST draft\n' >&2
-            draft_message
+            # Nothing fills the entry but a person: say the button had nothing to
+            # offer, and print no message at all. The panel credits no sentence to
+            # an AI that did not write it because there is no sentence.
+            printf 'HOUND-SUGGEST none\n' >&2
             exit 0
         fi
 
@@ -288,11 +307,12 @@ case "$action" in
         } >"$work/brief" 2>/dev/null
         [ -s "$work/brief" ] || exit 3
 
-        # A CLI that is missing, unauthenticated, slow or silent must not cost
-        # the user the entry: anything short of a usable message falls back to
-        # the wording that always works. The exit status is checked first - an
-        # agent that is not logged in announces it on stdout, and unchecked that
-        # sentence becomes a commit message in the user's history.
+        # A CLI that is missing, unauthenticated, slow or silent must not put a
+        # sentence of its own making into the entry: anything short of a usable
+        # message leaves the field exactly as the person left it. The exit status
+        # is checked first - an agent that is not logged in announces it on
+        # stdout, and unchecked that sentence becomes a commit message in the
+        # user's history.
         candidate=""
         # The AI runs inside the chezmoi source: that is the tree being described,
         # and agent CLIs tend to refuse a directory they do not recognise (codex
@@ -312,8 +332,10 @@ case "$action" in
                 ;;
         esac
         if [ -z "$candidate" ]; then
+            # The suggestion failed, so nothing stands in for it: the entry keeps
+            # whatever the person has typed, and the panel says which agent did
+            # not answer.
             printf 'HOUND-SUGGEST failed=%s status=%s\n' "$cli" "$ai_status" >&2
-            draft_message
             exit 0
         fi
         printf 'HOUND-SUGGEST ai=%s\n' "$cli" >&2
@@ -324,8 +346,10 @@ case "$action" in
         work=$(mktemp -d "${TMPDIR:-/tmp}/chezmoi-hound-act.XXXXXX") || exit 0
         trap 'rm -rf "$work"' EXIT INT TERM
         : >"$work/captured"
+        : >"$work/removed"
         : >"$work/left"
         captured=0
+        removed=0
 
         # chezmoi status, one drifting target at a time. The count is read again
         # here rather than trusted from the badge, because the badge may be a few
@@ -335,6 +359,7 @@ case "$action" in
         while IFS= read -r line; do
             [ -n "$line" ] || continue
             [ "${#line}" -ge 4 ] || continue
+            col1=$(printf '%s' "$line" | cut -c1)
             col=$(printf '%s' "$line" | cut -c2)
             case "$col" in
                 ' '|'R') continue ;;   # in sync, or a run script that is only due
@@ -342,11 +367,43 @@ case "$action" in
             path=${line#?? }
             [ -n "$path" ] || continue
 
+            case "$col1$col" in
+                # Column 2 A means "chezmoi apply will create it": the source has
+                # an entry this machine has no file for. Column 1 says why, and
+                # only one of the two reasons is the user's own change.
+                #
+                # 'DA' - the file was deleted here since chezmoi last looked, so
+                # capturing reality means dropping the source entry. `add` cannot
+                # express a deletion, which is why a deleted target used to sit in
+                # the count forever however often the button was pressed. `forget`
+                # gets this one explicit path (never the tree at large), changes
+                # nothing in $HOME, and git still holds the removed file.
+                'DA')
+                    # --force only skips forget's interactive "Remove ...?"
+                    # prompt: the argument is already this one explicit path.
+                    if chez forget --force "$HOME/$path" >/dev/null 2>&1; then
+                        printf 'gone from here, so dropped from the source: %s\n' "$path" >>"$work/removed"
+                        removed=$((removed + 1))
+                    else
+                        printf 'could not drop from the source: %s\n' "$path" >>"$work/left"
+                    fi
+                    continue
+                    ;;
+                # ' A' - nothing changed here and no file was ever applied, so
+                # this is not drift anyone created: applying the source would
+                # create it, and dropping it would manage away a real entry. Say
+                # so and leave it.
+                ' A')
+                    printf 'not applied here, so left alone: %s\n' "$path" >>"$work/left"
+                    continue
+                    ;;
+            esac
+
             case "$col" in
-                'M'|'A') ;;                        # edited / added here: capture it
+                # M (the content differs) and D (the file is here but the source
+                # lost the entry) are both captured by writing it back.
+                'M'|'D') ;;
                 *)
-                    # A deletion, or anything else: removing the source because
-                    # the live file vanished is a judgement call, not a button.
                     printf 'left alone, needs you: %s\n' "$path" >>"$work/left"
                     continue
                     ;;
@@ -382,18 +439,26 @@ case "$action" in
             echo "nothing to commit: the source already matches \$HOME"
         else
             printf 'staged %s file(s)\n' "$(gitrepo diff --cached --name-only | grep -c . )"
-            # The panel's entry, a file when a shell made quoting awkward, or
-            # the wording that needs no thought at all. -F - keeps whatever line
-            # breaks the message has.
+            # The panel's entry, or a file when a shell made quoting awkward.
+            # An empty entry is left empty: --allow-empty-message commits the
+            # blank the person chose, where substituting wording they did not
+            # write would put words in their history that they never said. -F -
+            # keeps whatever line breaks the message has.
             if [ -z "$message" ] && [ -n "$messagefile" ]; then
                 message=$(head -c 65536 "$messagefile" 2>/dev/null) || message=""
             fi
+            blank=""
             case "$message" in
                 *[![:space:]]*) ;;
-                *) message=$(draft_message) ;;
+                *) blank="--allow-empty-message" ;;
             esac
-            if printf '%s\n' "$message" | gitrepo commit -q -F -; then
-                printf 'committed %s\n' "$(gitrepo log -1 --format='%h %s')"
+            if printf '%s\n' "$message" | gitrepo commit -q $blank -F -; then
+                subject=$(gitrepo log -1 --format='%s')
+                case "$subject" in
+                    *[![:space:]]*) ;;
+                    *) subject='(no message)' ;;
+                esac
+                printf 'committed %s %s\n' "$(gitrepo log -1 --format='%h')" "$subject"
                 printf 'now %s commit(s) ahead of the remote\n' \
                     "$(gitrepo rev-list --count '@{u}..HEAD' 2>/dev/null || printf '?')"
                 echo "-> the count includes them now; push when you are ready"
@@ -403,8 +468,10 @@ case "$action" in
             fi
         fi
 
-        cat "$work/captured" "$work/left" 2>/dev/null
-        [ "$captured" -gt 0 ] && printf '%s target(s) captured\n' "$captured"
+        cat "$work/captured" "$work/removed" "$work/left" 2>/dev/null
+        # No "N target(s) captured" summary: every captured path is in that list
+        # already, and the panel states the outcome in its own words.
+        [ "$removed" -gt 0 ] && printf '%s gone from here, so dropped from the source\n' "$removed"
         ;;
 
     push)
@@ -434,8 +501,107 @@ case "$action" in
         fi
         ;;
 
+    undo)
+        # Taking a commit back. Two ways to do it, and which one is honest
+        # depends on whether the remote has the commit: a commit nobody else has
+        # can leave the history (its changes return to the working tree, still
+        # uncommitted), while one the remote has seen must stay in the history or
+        # every clone that pulled it is broken - so its changes are reverted into
+        # the working tree instead. The panel says which of the two happened.
+        case "$sha" in
+            "")
+                echo "undo needs --commit <sha>"
+                exit 2
+                ;;
+            *[!0-9a-fA-F]*)
+                # Not repaired, and not guessed at: a malformed id is refused.
+                printf "undo: '%s' is not a commit id\n" "$sha"
+                exit 2
+                ;;
+        esac
+        if [ "${#sha}" -lt 7 ] || [ "${#sha}" -gt 40 ]; then
+            printf "undo: '%s' is not a commit id\n" "$sha"
+            exit 2
+        fi
+
+        full=$(gitrepo rev-parse --verify --quiet "${sha}^{commit}" 2>/dev/null) || full=""
+        if [ -z "$full" ]; then
+            printf 'no commit %s in %s\n' "$sha" "$srcdir"
+            exit 1
+        fi
+
+        # Only the five the panel lists are offered: this is the undo of a row
+        # someone can see, not a history editor with a sha in it.
+        listed=no
+        for candidate in $(gitrepo log --format=%H -n 5 2>/dev/null); do
+            [ "$candidate" = "$full" ] && listed=yes
+        done
+        if [ "$listed" = no ]; then
+            echo "undo is offered for the last five commits only"
+            exit 2
+        fi
+
+        head=$(gitrepo rev-parse HEAD 2>/dev/null) || head=""
+        parent=$(gitrepo rev-parse --verify --quiet "${full}^" 2>/dev/null) || parent=""
+        subject=$(gitrepo log --format=%s -n 1 "$full" 2>/dev/null) || subject=""
+        short=$(gitrepo rev-parse --short "$full" 2>/dev/null) || short="$sha"
+
+        pushed=no
+        upstream=$(gitrepo rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || upstream=""
+        if [ -n "$upstream" ] && gitrepo merge-base --is-ancestor "$full" '@{u}' 2>/dev/null; then
+            pushed=yes
+        fi
+
+        if [ -n "$dry" ]; then
+            if [ "$full" = "$head" ] && [ "$pushed" = no ]; then
+                printf 'dry run: would uncommit %s (%s); its changes stay in the working tree\n' "$short" "$subject"
+            elif [ "$pushed" = yes ]; then
+                printf 'dry run: would revert %s (%s) into the working tree; %s has it, so it stays in the history\n' \
+                    "$short" "$subject" "$upstream"
+            else
+                printf 'dry run: would revert %s (%s) into the working tree; it is not the newest, so it stays in the history\n' \
+                    "$short" "$subject"
+            fi
+            exit 0
+        fi
+
+        if [ "$full" = "$head" ] && [ "$pushed" = no ]; then
+            if [ -z "$parent" ]; then
+                printf '%s is the first commit: there is nothing to uncommit it to\n' "$short"
+                exit 1
+            fi
+            if gitrepo reset --soft "$parent"; then
+                printf 'undid %s (%s) - its changes are back in the working tree, uncommitted\n' "$short" "$subject"
+            else
+                printf 'could not uncommit %s\n' "$short"
+                exit 1
+            fi
+        else
+            if gitrepo revert --no-commit "$full" >/dev/null 2>&1; then
+                if [ "$pushed" = yes ]; then
+                    printf 'reverted %s (%s) into the working tree - %s has it, so it stays in the history\n' \
+                        "$short" "$subject" "$upstream"
+                else
+                    printf 'reverted %s (%s) into the working tree - it is not the newest, so it stays in the history\n' \
+                        "$short" "$subject"
+                fi
+            else
+                # A revert that clashes is backed out before we return: a click in
+                # a panel must not leave someone a conflicted tree to clean up.
+                gitrepo revert --abort >/dev/null 2>&1
+                if gitrepo status --porcelain 2>/dev/null | grep -q '^UU'; then
+                    printf 'could not undo %s, and the tree is still conflicted - run: git -C %s revert --abort\n' \
+                        "$short" "$srcdir"
+                else
+                    printf 'could not undo %s: its changes clash with commits made after it\n' "$short"
+                fi
+                exit 1
+            fi
+        fi
+        ;;
+
     *)
-        echo "usage: chezmoi-hound-act commit | push | suggest [--source DIR] [--dry-run] [--message TEXT] [--ai COMMAND]"
+        echo "usage: chezmoi-hound-act commit | push | suggest | undo --commit SHA [--source DIR] [--dry-run] [--message TEXT] [--ai COMMAND]"
         exit 2
         ;;
 esac
