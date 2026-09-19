@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.1.1
+
+- **A suggestion can no longer change anything.** The drift handed to an agent is
+  text out of files that may have arrived from anywhere, and the agent used to
+  receive it with its tools switched on. It is now asked to work with them off —
+  `claude --tools ''`, `codex exec -s read-only`, `gemini --approval-mode plan`,
+  `opencode run --agent plan`, `hermes -t todo` — and, where `bubblewrap` is
+  installed, is sandboxed as well: the filesystem read-only, an empty throwaway
+  working directory, its own state overlaid so nothing it writes outlives the
+  run, and key material masked. The diff reaches the agent fenced and labelled as
+  untrusted data.
+- The **lock** moved out of `$TMPDIR` and into a `0700` directory this user owns
+  (`$XDG_RUNTIME_DIR/chezmoi-hound`, else `$HOME/.cache/chezmoi-hound`). A lock
+  whose *name* another account can create is a lock that can be pointed at a
+  symlink and made to truncate a file of yours. It is now created without
+  following links, and opened without truncation.
+- The agent runs in a **directory of its own** rather than in the source tree it
+  is describing.
+
 ## 1.1.0
 
 - A **zero** on the bar is drawn in the same colour as every other count. It used

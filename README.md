@@ -44,9 +44,16 @@ External dependencies, all of which an Omarchy machine already has:
 | [`chezmoi`](https://www.chezmoi.io/) | reads the drift in `$HOME` | any v2 (`chezmoi status`, `chezmoi source-path`) |
 | `git` | the source repo's working tree and its unpushed commits | any |
 | `omarchy-launch-floating-terminal-with-presentation` | the panel's **Full details** button | ships with Omarchy |
+| [`bubblewrap`](https://github.com/containers/bubblewrap) | the sandbox the **Suggest** leg runs an agent inside | any (`bwrap --tmp-overlay`) |
 
 There is no dependency on `jq`, on a systemd timer, or on anything in
 `~/.local/bin`: the widget ships its own two scripts and runs them itself.
+
+`bubblewrap` matters only to **Suggest**, and it is the difference between asking
+an agent nicely and making it so: with it, a suggestion runs against a read-only
+filesystem in a directory of its own. Without it the agents still run in their
+own no-tools or read-only modes — those are asked for either way — but nothing
+enforces them beyond each CLI's own word.
 
 ## Remove
 
@@ -114,6 +121,15 @@ The line under the entry says what came back: a suggestion is credited to the
 agent that wrote it, and a run that produced nothing usable says so and leaves
 the entry as you left it. Nothing leaves the machine unless you press **Suggest**.
 
+The agent is asked to work with its tools off — `claude --tools ''`, `codex exec
+-s read-only`, `gemini --approval-mode plan`, `opencode run --agent plan`,
+`hermes -t todo` — and, where `bubblewrap` is installed, is sandboxed as well: the
+whole filesystem read-only, an empty throwaway directory as its working
+directory, its own state overlaid so nothing it writes outlives the run, and your
+keys masked. Network stays up, because the agent needs its own provider. The diff
+arrives fenced and labelled as untrusted data: a dotfile can have come from
+anywhere, and a line in one is read by whatever runs next.
+
 ### What a commit and a push will and will not do
 
 - **Commit** captures targets whose state is `M` (modified here) or `A` (new
@@ -145,18 +161,20 @@ The plugin is two POSIX `sh` scripts plus one QML file:
   works from wherever it was installed.
 - They run `chezmoi status`, `chezmoi source-path`, `chezmoi add`, and plain
   `git` inside your source repo. Nothing else: nothing runs with escalated
-  privileges, nothing touches the network, there is no `eval`, and nothing is
-  written outside the source repo.
+  privileges, there is no `eval`, nothing is written outside the source repo, and
+  nothing else touches the network — the one thing here that leaves the machine
+  is a **Suggest** run, to your agent's own provider.
 - A malformed or failed reading leaves the previous number on screen and says why
   in the panel; it never empties the badge or invents a number.
 - A reading is refused outright unless the three counts add up to the total.
 - **Suggest** is the only part that runs anything beyond `chezmoi` and `git`: it
   pipes the drift to your default agent's *non-interactive* mode — `hermes -z`,
   `claude -p`, `codex exec`, `gemini -p`, `opencode run` — and does nothing at
-  all when your agent is not one of those. It runs inside your source directory,
-  under a timeout, and if the agent answers with nothing usable the entry stays
-  as you left it. It cannot commit anything: it fills the entry, and the commit
-  still needs the button.
+  all when your agent is not one of those. The agent is given no tools to act
+  with, and is sandboxed when `bubblewrap` is present; it runs in a directory of
+  its own rather than in the tree it is describing, under a timeout, and if it
+  answers with nothing usable the entry stays as you left it. It cannot commit
+  anything: it fills the entry, and the commit still needs the button.
 
 Read `bin/chezmoi-hound-check` and `bin/chezmoi-hound-act` — they are short, and
 the comments say why each rule exists.
