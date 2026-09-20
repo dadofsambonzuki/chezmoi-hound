@@ -44,16 +44,18 @@ External dependencies, all of which an Omarchy machine already has:
 | [`chezmoi`](https://www.chezmoi.io/) | reads the drift in `$HOME` | any v2 (`chezmoi status`, `chezmoi source-path`) |
 | `git` | the source repo's working tree and its unpushed commits | any |
 | `omarchy-launch-floating-terminal-with-presentation` | the panel's **Full details** button | ships with Omarchy |
-| [`bubblewrap`](https://github.com/containers/bubblewrap) | the sandbox the **Suggest** leg runs an agent inside | any (`bwrap --tmp-overlay`) |
+| [`bubblewrap`](https://github.com/containers/bubblewrap) | the sandbox a **Suggest** run happens inside — **Suggest** does not run without it | any (`bwrap --tmp-overlay`) |
 
 There is no dependency on `jq`, on a systemd timer, or on anything in
 `~/.local/bin`: the widget ships its own two scripts and runs them itself.
 
-`bubblewrap` matters only to **Suggest**, and it is the difference between asking
-an agent nicely and making it so: with it, a suggestion runs against a read-only
-filesystem in a directory of its own. Without it the agents still run in their
-own no-tools or read-only modes — those are asked for either way — but nothing
-enforces them beyond each CLI's own word.
+`bubblewrap` matters only to **Suggest**, and it is required there rather than
+recommended: a suggestion runs inside a filesystem namespace that holds the
+machine's runtime, the agents' own runtimes, and the agent's own state — and
+nothing else of yours, with an empty home put on first. The agents are also asked
+to work in their own no-tools or read-only modes, but a request is not an
+enforcement, and **Suggest** has no unsandboxed path: without `bubblewrap` the
+button is not offered at all.
 
 ## Remove
 
@@ -123,12 +125,19 @@ the entry as you left it. Nothing leaves the machine unless you press **Suggest*
 
 The agent is asked to work with its tools off — `claude --tools ''`, `codex exec
 -s read-only`, `gemini --approval-mode plan`, `opencode run --agent plan`,
-`hermes -t todo` — and, where `bubblewrap` is installed, is sandboxed as well: the
-whole filesystem read-only, an empty throwaway directory as its working
-directory, its own state overlaid so nothing it writes outlives the run, and your
-keys masked. Network stays up, because the agent needs its own provider. The diff
-arrives fenced and labelled as untrusted data: a dotfile can have come from
-anywhere, and a line in one is read by whatever runs next.
+`hermes -t todo` — and runs inside a `bubblewrap` namespace, which is required:
+the allowlist is the machine's runtime (`/usr`, `/etc`, `/opt`), the agents' own
+runtimes (`~/.local/share/mise`, `~/.local/share/uv`), the resolver file, `/proc`,
+`/dev` and an empty directory as its working directory. `$HOME` itself is empty —
+only the agents' own directories are put back, overlaid, so their session files
+work within the run and are gone after it. Your ssh keys, `gh` credentials,
+keyrings, `chezmoi` config, projects and documents are not in the namespace to be
+read at all, and the environment is cleared: the agent gets `PATH`, `HOME`, `TERM`,
+`LANG`, `TMPDIR` and a provider key, not the shell's exported tokens or its ssh
+agent socket. Reading is disclosure, which is why read-only was not enough here.
+Network stays up, because the agent needs its own provider. The diff arrives
+fenced and labelled as untrusted data: a dotfile can have come from anywhere, and
+a line in one is read by whatever runs next.
 
 ### What a commit and a push will and will not do
 
@@ -171,10 +180,12 @@ The plugin is two POSIX `sh` scripts plus one QML file:
   pipes the drift to your default agent's *non-interactive* mode — `hermes -z`,
   `claude -p`, `codex exec`, `gemini -p`, `opencode run` — and does nothing at
   all when your agent is not one of those. The agent is given no tools to act
-  with, and is sandboxed when `bubblewrap` is present; it runs in a directory of
-  its own rather than in the tree it is describing, under a timeout, and if it
-  answers with nothing usable the entry stays as you left it. It cannot commit
-  anything: it fills the entry, and the commit still needs the button.
+  with, and runs in a `bubblewrap` namespace holding nothing of yours beyond that
+  agent's own state; without `bubblewrap` there is no **Suggest** leg. It runs in
+  a directory of its own rather than in the tree it is describing, under a
+  timeout, and if it answers with nothing usable the entry stays as you left it.
+  It cannot commit anything: it fills the entry, and the commit still needs the
+  button.
 
 Read `bin/chezmoi-hound-check` and `bin/chezmoi-hound-act` — they are short, and
 the comments say why each rule exists.

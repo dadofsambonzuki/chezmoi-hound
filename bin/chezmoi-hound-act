@@ -326,34 +326,88 @@ $(head -c 12000 "$3")"
                   by_stdin_join=1 ;;
     esac
 
-    # Whatever is left of the agent's reach is bounded by the kernel where
-    # bubblewrap is installed: the whole filesystem read-only, an empty throwaway
-    # /tmp as its working directory, its own state directories (logs, sessions,
-    # caches) overlaid so its bookkeeping still works but does not outlive the
-    # run, and key material masked. Network stays up on purpose - the agent needs
-    # its own provider - and writing to the user's files is what this is for.
-    if command -v bwrap >/dev/null 2>&1 && [ "${HOUND_NO_SANDBOX:-0}" != 1 ]; then
-        # Overlay only what exists: bwrap refuses an overlay on a missing name,
-        # and --tmp-overlay needs its --overlay-src to read the real directory
-        # through. A $HOME with a space in it would split badly here, which is
-        # why the glob is off and every name is checked first.
-        set -f
-        sandbox_opts=""
-        for d in "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini" "$HOME/.config/opencode" \
-                 "$HOME/.local/share/opencode" "$HOME/.cache/opencode" \
-                 "$HOME/.hermes" "${HERMES_HOME:-}"; do
-            [ -n "$d" ] && [ -d "$d" ] &&
-                sandbox_opts="$sandbox_opts --overlay-src $d --tmp-overlay $d"
-        done
-        for d in "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.aws"; do
-            [ -n "$d" ] && [ -d "$d" ] && sandbox_opts="$sandbox_opts --tmpfs $d"
-        done
-        set +f
-        # shellcheck disable=SC2086
-        set -- bwrap --die-with-parent --unshare-pid --unshare-uts --unshare-ipc \
-               --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --chdir /tmp \
-               $sandbox_opts -- "$@"
+    # The agent's reach is bounded here, and this layer is required rather than
+    # optional. Every one of those CLIs can *read* files even where it cannot
+    # write them, and the drift it is handed comes out of files this machine did
+    # not author - so a poisoned config can ask it to read a credential and put
+    # the contents in the answer that goes to its provider. Reading is disclosure;
+    # the previous "whole filesystem, read-only" bound stopped the writing and
+    # left the reading. So the namespace is an allowlist: the runtime of this
+    # machine and of the agents themselves, an empty home with only the agent's
+    # own directories put back, and nothing else.
+    #
+    # No bubblewrap, no suggestion. A protection that disappears when a binary is
+    # missing is not a protection, and there is deliberately no unsandboxed path
+    # to fall back to.
+    if ! command -v bwrap >/dev/null 2>&1; then
+        printf 'HOUND-SUGGEST sandbox=missing\n' >&2
+        return 1
     fi
+
+    # Word splitting on $sandbox_opts is deliberate - bwrap takes one argument per
+    # value - which is why the glob is off and every name is checked first. A
+    # $HOME with a space in it is not supported by this.
+    set -f
+    sandbox_opts=""
+    # An empty home goes on first. A mount made inside $HOME before this one is
+    # covered by the tmpfs, so the agent then sees an empty directory where its
+    # own runtime should be - which is how this was caught: hermes exited 127 with
+    # its interpreter missing, because the venv points into a python install under
+    # $HOME that a later tmpfs had hidden.
+    sandbox_opts="$sandbox_opts --tmpfs $HOME"
+    # Read-only, because it is code: the machine's runtime, and the tool runtimes
+    # the agents are installed through - the mise installs, and uv's pythons,
+    # which is where the hermes venv's interpreter actually lives.
+    for d in /usr /etc /opt "$HOME/.local/share/mise" "$HOME/.local/share/uv"; do
+        [ -n "$d" ] && [ -d "$d" ] && sandbox_opts="$sandbox_opts --ro-bind $d $d"
+    done
+    # /bin, /lib, /lib64 and /sbin are symlinks into /usr here and the command
+    # resolvers follow them, so put them back.
+    sandbox_opts="$sandbox_opts --symlink usr/bin /bin --symlink usr/lib /lib"
+    sandbox_opts="$sandbox_opts --symlink usr/lib /lib64 --symlink usr/bin /sbin"
+    # One file of the resolver: /etc/resolv.conf is a symlink into
+    # /run/systemd/resolve on this distribution, so without it the agent resolves
+    # nothing and its provider call fails as a timeout rather than as an error
+    # about configuration. The rest of /run - session sockets, the keyring, dbus -
+    # stays out.
+    [ -f /run/systemd/resolve/stub-resolv.conf ] &&
+        sandbox_opts="$sandbox_opts --ro-bind /run/systemd/resolve/stub-resolv.conf /run/systemd/resolve/stub-resolv.conf"
+    # Then the agent's own directories go back in, overlaid, so its session files
+    # and logs still work within the run but do not outlive it. Whatever
+    # credentials are in them are that agent's own - the thing it must have to
+    # reach its provider at all - and nothing else in the home is reachable.
+    for d in "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini" \
+             "$HOME/.config/opencode" "$HOME/.local/share/opencode" \
+             "$HOME/.cache/opencode" "$HOME/.hermes"; do
+        [ -n "$d" ] && [ -d "$d" ] &&
+            sandbox_opts="$sandbox_opts --dir $d --overlay-src $d --tmp-overlay $d"
+    done
+    [ -f "$HOME/.claude.json" ] &&
+        sandbox_opts="$sandbox_opts --ro-bind $HOME/.claude.json $HOME/.claude.json"
+    set +f
+
+    # The environment is the other half of the same problem: a shell that exports
+    # a token has handed that token to the agent. Only the transport's own
+    # variables are passed on, so a GitHub token, cloud credentials or an ssh
+    # agent socket sitting in the parent environment are not part of this process
+    # at all. The agents read their credentials from their own directories, which
+    # is what those directories are there for.
+    env_opts="--clearenv --setenv PATH $PATH --setenv HOME $HOME --setenv TMPDIR /tmp"
+    env_opts="$env_opts --setenv TERM ${TERM:-dumb} --setenv LANG ${LANG:-C.UTF-8}"
+    for v in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY \
+             OPENROUTER_API_KEY XAI_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY; do
+        eval "sandbox_value=\${$v:-}"
+        [ -n "$sandbox_value" ] && env_opts="$env_opts --setenv $v $sandbox_value"
+    done
+
+    # Network stays: the provider transport is the one thing the agent is here to
+    # reach, and with the filesystem allowlisted and the environment cleared there
+    # is nothing of the user's in reach to send through it.
+    # shellcheck disable=SC2086
+    set -- bwrap --die-with-parent --unshare-pid --unshare-uts --unshare-ipc \
+           $env_opts \
+           $sandbox_opts \
+           --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp -- "$@"
 
     if [ "$by_stdin" = 1 ]; then
         timeout -k 2 "$ai_t" "$@" <"$3"
@@ -380,7 +434,15 @@ case "$action" in
     suggest)
         if [ -n "$probe" ]; then
             cli=$(ai_command)
-            if [ -n "$cli" ]; then printf 'ai=%s\n' "$cli"; else printf 'ai=none\n'; fi
+            # Bubblewrap is what bounds the agent, and the suggest leg refuses to
+            # run without it (see ai_run). A probe that still said "ai=hermes"
+            # would put a button on the panel whose only job is to fail, so the
+            # same condition decides both.
+            if [ -n "$cli" ] && command -v bwrap >/dev/null 2>&1; then
+                printf 'ai=%s\n' "$cli"
+            else
+                printf 'ai=none\n'
+            fi
             exit 0
         fi
 
@@ -390,6 +452,10 @@ case "$action" in
             # offer, and print no message at all. The panel credits no sentence to
             # an AI that did not write it because there is no sentence.
             printf 'HOUND-SUGGEST none\n' >&2
+            exit 0
+        fi
+        if ! command -v bwrap >/dev/null 2>&1; then
+            printf 'HOUND-SUGGEST sandbox=missing\n' >&2
             exit 0
         fi
 
@@ -431,8 +497,11 @@ case "$action" in
         if [ -z "$candidate" ]; then
             # The suggestion failed, so nothing stands in for it: the entry keeps
             # whatever the person has typed, and the panel says which agent did
-            # not answer.
+            # not answer. The agent's own first line goes to the log, because
+            # "status=127" on its own does not say which of the two layers or the
+            # setup was wrong.
             printf 'HOUND-SUGGEST failed=%s status=%s\n' "$cli" "$ai_status" >&2
+            [ -s "$work/err" ] && printf 'HOUND-SUGGEST err=%s\n' "$(head -1 "$work/err")" >&2
             exit 0
         fi
         printf 'HOUND-SUGGEST ai=%s\n' "$cli" >&2

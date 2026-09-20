@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.1.2
+
+- **A suggestion no longer reads the whole machine, and no longer runs without a
+  sandbox.** The previous sandbox bound `/` read-only, which stops writes but not
+  reads: an agent that had been talked into it could still read your ssh keys,
+  `gh` credentials and shell environment. The namespace is now an allowlist —
+  the machine's runtime (`/usr`, `/etc`, `/opt`), the agents' own runtimes, the
+  resolver file, `/proc`, `/dev`, and an empty directory as its working
+  directory. `$HOME` is empty, with only the agents' own directories overlaid
+  back in, so keys, keyrings, `gh` credentials, `chezmoi` config, projects and
+  documents are not there to be read at all.
+- The agent's **environment is cleared** rather than inherited: it gets `PATH`,
+  `HOME`, `TERM`, `LANG`, `TMPDIR` and a provider key, not the shell's exported
+  tokens or its ssh agent socket.
+- **`bubblewrap` is required for Suggest**, not merely used when present. There
+  is no unsandboxed path left: the `HOUND_NO_SANDBOX` escape hatch is gone, and
+  without `bubblewrap` the leg refuses to run and the **Suggest** button is not
+  offered.
+- Two faults found by testing the above against a live agent: the empty home was
+  mounted *after* the agents' runtimes, which hid them and stopped the agent
+  starting; and `/etc/resolv.conf` points into `/run` on this distribution, so
+  without the resolver file bound the provider call failed as if the endpoint
+  were down.
+
 ## 1.1.1
 
 - **A suggestion can no longer change anything.** The drift handed to an agent is
