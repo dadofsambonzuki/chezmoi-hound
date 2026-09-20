@@ -125,12 +125,16 @@ the entry as you left it. Nothing leaves the machine unless you press **Suggest*
 
 The agent is asked to work with its tools off — `claude --tools ''`, `codex exec
 -s read-only`, `gemini --approval-mode plan`, `opencode run --agent plan`,
-`hermes -t todo` — and runs inside a `bubblewrap` namespace, which is required:
+`hermes -t todo`, plus a deny-everything policy for `gemini`, a config with its
+plugin tools stripped for `codex`, and a plugin that rejects tool calls for
+`opencode` — and runs inside a `bubblewrap` namespace, which is required:
 the allowlist is the machine's runtime (`/usr`, `/etc`, `/opt`), the agents' own
 runtimes (`~/.local/share/mise`, `~/.local/share/uv`), the resolver file, `/proc`,
 `/dev` and an empty directory as its working directory. `$HOME` itself is empty —
-only the agents' own directories are put back, overlaid, so their session files
-work within the run and are gone after it. Your ssh keys, `gh` credentials,
+each agent's state directory is re-created empty too, and only the single
+credential file a run needs to authenticate is put back into it, so the session
+files, request dumps and logs that live beside it are not in the namespace.
+Your ssh keys, `gh` credentials,
 keyrings, `chezmoi` config, projects and documents are not in the namespace to be
 read at all, and the environment is cleared: the agent gets `PATH`, `HOME`, `TERM`,
 `LANG`, `TMPDIR` and a provider key, not the shell's exported tokens or its ssh
@@ -181,7 +185,7 @@ The plugin is two POSIX `sh` scripts plus one QML file:
   `claude -p`, `codex exec`, `gemini -p`, `opencode run` — and does nothing at
   all when your agent is not one of those. The agent is given no tools to act
   with, and runs in a `bubblewrap` namespace holding nothing of yours beyond that
-  agent's own state; without `bubblewrap` there is no **Suggest** leg. It runs in
+  agent's own credential file; without `bubblewrap` there is no **Suggest** leg. It runs in
   a directory of its own rather than in the tree it is describing, under a
   timeout, and if it answers with nothing usable the entry stays as you left it.
   It cannot commit anything: it fills the entry, and the commit still needs the

@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.5
+
+- **The sandbox shows an agent its own credential, and nothing beside it.** Each
+  agent's whole state directory used to be put back inside the namespace, and a
+  poisoned diff could ask the agent to read what lives next to its credential —
+  session history, request dumps, logs, tens of megabytes of OpenCode state. Each
+  state directory is now re-created empty and only the single credential file is
+  put back into it, so the rest of the directory is not in the namespace to be
+  read: `~/.claude/.credentials.json`, `~/.codex/auth.json`, gemini's oauth files,
+  opencode's `auth.json`, and for hermes its provider key alone — copied out of a
+  `.env` of 536 lines that also holds every other integration's secrets.
+  `~/.claude.json` is no longer exposed at all.
+- **Every agent now has a policy of its own, not just a flag.** `claude` takes
+  `--tools ''`, `gemini` a deny-everything policy, `codex` a config with the
+  plugin tools its marketplace entry enables stripped out. `opencode` cannot be
+  given a no-tools config at all — its free tier refuses to serve a no-tools agent
+  — so a plugin rejects the tool call instead. `codex` has no tool-disable key
+  anywhere in it, which is why the boundary does the work there.
+- Generated configs are mounted only for the agent they were written for, and
+  hermes' own runtime only for hermes.
+- Verified by planting a secret in every agent's state directory: unreachable from
+  all five namespaces, with every leg still answering.
+
 ## 1.1.4
 
 - **A suggestion works under the environment the panel actually runs in.** The

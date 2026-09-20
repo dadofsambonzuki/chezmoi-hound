@@ -313,6 +313,9 @@ ai_run() {
     # leg feeds the prompt in rather than putting it on the command line.
     in_brief=$2
     in_drift=$3
+    # ...and the agent's name, for the same reason: the mount table further down
+    # is per-agent, and by the time it is built "$1" is a command line.
+    in_ai=$1
     # And the command itself has to be resolved out here, before the sandbox
     # exists. The shell that presses Suggest finds some agents as a wrapper in
     # $HOME/.local/bin and the rest through a mise shim in
@@ -413,18 +416,92 @@ $(head -c 12000 "$3")"
     # stays out.
     [ -f /run/systemd/resolve/stub-resolv.conf ] &&
         sandbox_opts="$sandbox_opts --ro-bind /run/systemd/resolve/stub-resolv.conf /run/systemd/resolve/stub-resolv.conf"
-    # Then the agent's own directories go back in, overlaid, so its session files
-    # and logs still work within the run but do not outlive it. Whatever
-    # credentials are in them are that agent's own - the thing it must have to
-    # reach its provider at all - and nothing else in the home is reachable.
-    for d in "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini" \
-             "$HOME/.config/opencode" "$HOME/.local/share/opencode" \
-             "$HOME/.cache/opencode" "$HOME/.hermes"; do
-        [ -n "$d" ] && [ -d "$d" ] &&
-            sandbox_opts="$sandbox_opts --dir $d --overlay-src $d --tmp-overlay $d"
+    # Then a state directory for the agent to work in - an empty one, for this run
+    # only - and the single credential it needs to reach its provider put back
+    # inside that. Overlaying the whole directory back in was the wrong trade, and
+    # the review that called it out was right: besides the credential those
+    # directories hold this machine's own record of itself - session history,
+    # transcripts, request dumps, logs, a database of past runs - and the diff the
+    # agent is handed comes from files this machine did not author, so it can be
+    # asked to read them and put what it finds in the answer that goes to the
+    # provider. Reading is disclosure, and the credential was never the only thing
+    # worth taking. Verified by planting a canary in each of those directories and
+    # asking every agent, through a poisoned diff, to read it out.
+    state_root="${work:-${TMPDIR:-/tmp}}/hound-state"
+    state_paths=""
+    state_files=""
+    case "$in_ai" in
+        claude)   state_paths="$HOME/.claude"
+                  state_files="$HOME/.claude/.credentials.json $HOME/.claude/settings.json" ;;
+        codex)    state_paths="$HOME/.codex"
+                  state_files="$HOME/.codex/auth.json" ;;
+        gemini)   state_paths="$HOME/.gemini"
+                  state_files="$HOME/.gemini/oauth_creds.json $HOME/.gemini/google_accounts.json $HOME/.gemini/settings.json" ;;
+        opencode) state_paths="$HOME/.local/share/opencode $HOME/.config/opencode"
+                  state_files="$HOME/.local/share/opencode/auth.json" ;;
+        hermes)   state_paths="$HOME/.hermes"
+                  state_files="$HOME/.hermes/config.yaml" ;;
+    esac
+    for d in $state_paths; do
+        case "$d" in "$HOME"/*) ;; *) continue ;; esac
+        mkdir -p "$state_root$d" 2>/dev/null || continue
+        sandbox_opts="$sandbox_opts --bind $state_root$d $d"
     done
-    [ -f "$HOME/.claude.json" ] &&
-        sandbox_opts="$sandbox_opts --ro-bind $HOME/.claude.json $HOME/.claude.json"
+    for f in $state_files; do
+        [ -n "$f" ] && [ -f "$f" ] &&
+            sandbox_opts="$sandbox_opts --ro-bind-try $f $f"
+    done
+    # The tool runtimes the agent is *code* through, which is not state: hermes'
+    # own program and virtual environment, and the config each CLI is given for
+    # this run. The codex config in particular is written here rather than mounted:
+    # the user's own names plugin marketplaces that hand the agent a browser and
+    # computer-use tools, and only its model line is read out.
+    [ "$in_ai" = hermes ] && [ -d "$HOME/.hermes/hermes-agent" ] &&
+        sandbox_opts="$sandbox_opts --ro-bind $HOME/.hermes/hermes-agent $HOME/.hermes/hermes-agent"
+    if [ -n "$work" ]; then
+        mkdir -p "$work/gemini-policies"
+        printf '%s\n' \
+            '[[rule]]' \
+            'toolName = "*"' \
+            'decision = "deny"' \
+            'priority = 999' \
+            'interactive = false' > "$work/gemini-policies/00-hound-deny.toml"
+        # Each agent gets its own generated config, and only its own: a file mounted
+        # for a run that cannot read it is one more thing in the namespace.
+        case "$in_ai" in
+            codex)
+                codex_model=$(sed -n 's/^model[[:space:]]*=.*/&/p' "$HOME/.codex/config.toml" 2>/dev/null | head -1)
+                printf '%s\n' "$codex_model" > "$work/codex-config.toml"
+                sandbox_opts="$sandbox_opts --ro-bind-try $work/codex-config.toml $HOME/.codex/config.toml" ;;
+            opencode)
+                printf '%s\n' \
+                    '{' \
+                    '  "$schema": "https://opencode.ai/config.json",' \
+                    '  "autoupdate": false,' \
+                    '  "share": "disabled"' \
+                    '}' > "$work/opencode.json"
+                # Switching tools off in the config is the wrong lever here: a
+                # no-tools agent is one opencode's own free tier refuses to serve.
+                # The plugin rejects the call itself, which works and says why.
+                mkdir -p "$state_root$HOME/.config/opencode/plugin" 2>/dev/null
+                cat > "$state_root$HOME/.config/opencode/plugin/hound.js" <<'HOUNDPLUGIN'
+export const HoundNoTools = async () => ({
+  "tool.execute.before": async () => { throw new Error("tool use disabled by chezmoi-hound") }
+})
+HOUNDPLUGIN
+                sandbox_opts="$sandbox_opts --ro-bind-try $work/opencode.json $HOME/.config/opencode/opencode.json" ;;
+            gemini)
+                sandbox_opts="$sandbox_opts --ro-bind-try $work/gemini-policies/00-hound-deny.toml $HOME/.gemini/policies/00-hound-deny.toml" ;;
+            hermes)
+                # Its provider key is one line in a 536-line .env that also holds
+                # every other integration's secrets. Only the transport credential
+                # for the configured provider is copied across.
+                : > "$work/hermes-env"
+                [ -f "$HOME/.hermes/.env" ] &&
+                    grep -E '^[A-Za-z0-9_]*(API_KEY|_KEY|_TOKEN|TOKEN)=' "$HOME/.hermes/.env" > "$work/hermes-env" 2>/dev/null
+                sandbox_opts="$sandbox_opts --ro-bind-try $work/hermes-env $HOME/.hermes/.env" ;;
+        esac
+    fi
     set +f
 
     # The environment is the other half of the same problem: a shell that exports
