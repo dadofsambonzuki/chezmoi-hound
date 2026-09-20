@@ -305,6 +305,14 @@ ai_run() {
     ai_t=120
     by_stdin=1
     by_stdin_join=0
+    # The case below rewrites this function's own positional parameters onto the
+    # agent's command line, and the bwrap argv rewrites them again. The two files
+    # the caller handed over therefore have to be taken first: reading "$3" after
+    # any of that is reading an agent or bwrap option - "…--unshare-pid: No such
+    # file or directory" was this filename, and it refused every suggestion whose
+    # leg feeds the prompt in rather than putting it on the command line.
+    in_brief=$2
+    in_drift=$3
     case "$1" in
         claude)   ai_t=90
                   set -- claude -p --tools '' "$(cat "$2")" ;;
@@ -410,9 +418,9 @@ $(head -c 12000 "$3")"
            --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp -- "$@"
 
     if [ "$by_stdin" = 1 ]; then
-        timeout -k 2 "$ai_t" "$@" <"$3"
+        timeout -k 2 "$ai_t" "$@" <"$in_drift"
     elif [ "$by_stdin_join" = 1 ]; then
-        { cat "$2"; printf '\nChanges:\n'; head -c 12000 "$3"; } | timeout -k 2 "$ai_t" "$@"
+        { cat "$in_brief"; printf '\nChanges:\n'; head -c 12000 "$in_drift"; } | timeout -k 2 "$ai_t" "$@"
     else
         timeout -k 2 "$ai_t" "$@"
     fi

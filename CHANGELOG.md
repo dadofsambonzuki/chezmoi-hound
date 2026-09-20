@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.3
+
+- **A suggestion no longer fails for the agents that are handed the prompt on
+  stdin.** The sandbox code rewrote the shell function's own arguments — once
+  onto the agent's command line and again onto bubblewrap's — and then read the
+  drift file out of `$3` as if those argument lists had never touched it. `$3`
+  was a bubblewrap or agent option by then, so the shell tried to open
+  `--unshare-pid` as a file: the agent never ran, and Suggest reported the
+  agent's own failure. Taking the two files before anything rewrites the
+  arguments fixes it, and opencode, codex and hermes all return a suggestion
+  again.
+- Verified by running each supported agent through the leg: hermes, opencode and
+  codex answer; gemini and claude report their own not-logged-in failures.
+
 ## 1.1.2
 
 - **A suggestion no longer reads the whole machine, and no longer runs without a
