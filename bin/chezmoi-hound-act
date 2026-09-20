@@ -313,19 +313,44 @@ ai_run() {
     # leg feeds the prompt in rather than putting it on the command line.
     in_brief=$2
     in_drift=$3
+    # And the command itself has to be resolved out here, before the sandbox
+    # exists. The shell that presses Suggest finds some agents as a wrapper in
+    # $HOME/.local/bin and the rest through a mise shim in
+    # $HOME/.local/share/mise/shims, and neither directory is in the namespace: the
+    # shim then reports "No version is set for shim: opencode" because it cannot
+    # see the config that says which version it stands for, and the wrapper is
+    # simply not there to exec - which is the "env: 'hermes': No such file or
+    # directory" and status 127 the panel showed. Resolving to the real file on
+    # this side and binding that one file in is what makes the leg the same leg
+    # whoever is logged in.
+    ai_exe=$(command -v "$1" 2>/dev/null || true)
+    case "$ai_exe" in
+        */mise/shims/*)
+            # A shim is a symlink to the mise binary itself, so resolving it would
+            # run mise *as* the agent - "mise ERROR no tasks defined" with the
+            # agent's flags as mise's own. mise knows which install the shim stands
+            # for, and it is asked while the config it reads is still in reach.
+            ai_shim=$(mise which "$1" 2>/dev/null || true)
+            [ -n "$ai_shim" ] && [ -x "$ai_shim" ] && ai_exe=$ai_shim ;;
+        *)
+            ai_real=$(readlink -f "$ai_exe" 2>/dev/null || true)
+            [ -n "$ai_real" ] && [ -x "$ai_real" ] && ai_exe=$ai_real ;;
+    esac
+    [ -n "$ai_exe" ] || ai_exe=$1
+    ai_real=$(readlink -f "$ai_exe" 2>/dev/null || true)
     case "$1" in
         claude)   ai_t=90
-                  set -- claude -p --tools '' "$(cat "$2")" ;;
-        codex)    set -- codex exec -s read-only --skip-git-repo-check "$(cat "$2")" ;;
+                  set -- "$ai_exe" -p --tools '' "$(cat "$2")" ;;
+        codex)    set -- "$ai_exe" exec -s read-only --skip-git-repo-check "$(cat "$2")" ;;
         gemini)   ai_t=90
-                  set -- gemini --approval-mode plan -p "$(cat "$2")" ;;
-        opencode) set -- opencode run --agent plan "$(cat "$2")
+                  set -- "$ai_exe" --approval-mode plan -p "$(cat "$2")" ;;
+        opencode) set -- "$ai_exe" run --agent plan "$(cat "$2")
 
 $(head -c 12000 "$3")" ;;
         # -t todo is the toolset with no shell, no file access and no fetch. That
         # it really lacks them was measured, not assumed: asked to run `id -un`
         # and to write a file, it did neither and said so.
-        hermes)   set -- env -u HERMES_SESSION_SOURCE hermes -t todo -z "$(cat "$2")
+        hermes)   set -- env -u HERMES_SESSION_SOURCE "$ai_exe" -t todo -z "$(cat "$2")
 
 $(head -c 12000 "$3")"
                   by_stdin=0 ;;
@@ -368,6 +393,14 @@ $(head -c 12000 "$3")"
     # which is where the hermes venv's interpreter actually lives.
     for d in /usr /etc /opt "$HOME/.local/share/mise" "$HOME/.local/share/uv"; do
         [ -n "$d" ] && [ -d "$d" ] && sandbox_opts="$sandbox_opts --ro-bind $d $d"
+    done
+    # The resolved command itself, bound as the single file it is. A wrapper in
+    # $HOME/.local/bin, or a mise install binary already covered - usually a no-op,
+    # and the difference between the agent starting and the panel reporting 127
+    # when it is not.
+    for f in "$ai_exe" "$ai_real"; do
+        [ -n "$f" ] && [ -e "$f" ] &&
+            sandbox_opts="$sandbox_opts --ro-bind $f $f"
     done
     # /bin, /lib, /lib64 and /sbin are symlinks into /usr here and the command
     # resolvers follow them, so put them back.

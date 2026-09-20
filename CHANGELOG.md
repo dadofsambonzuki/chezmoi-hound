@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.4
+
+- **A suggestion works under the environment the panel actually runs in.** The
+  sandbox bound the tool runtimes but not the command the leg had resolved, and
+  the shell that presses Suggest finds agents in two places that were outside the
+  namespace: a wrapper in `$HOME/.local/bin` (hermes) and a mise shim in
+  `$HOME/.local/share/mise/shims` (opencode, codex, gemini, claude). The wrapper
+  was not there to exec — `env: 'hermes': No such file or directory`, status 127 —
+  and a shim is a symlink to the mise binary, so resolving it ran mise as the agent
+  and reported `mise ERROR no tasks defined`. The command is now resolved on the
+  host, through `mise which` where a shim stands for one, and that one file is
+  bound into the namespace. Developers whose `PATH` already pointed into the
+  installs did not see this; the panel's environment did.
+- Measured in both environments, with each agent run through the leg: hermes,
+  opencode and codex answer in both; gemini and claude report their own
+  not-logged-in state in both.
+
 ## 1.1.3
 
 - **A suggestion no longer fails for the agents that are handed the prompt on
