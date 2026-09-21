@@ -86,6 +86,7 @@ layout in `~/.config/omarchy/shell.json`, which Omarchy writes itself.
 | Right-click | Opens a floating terminal with the full text |
 | **Push N commits** | `git push` on the branch's existing upstream — nothing else |
 | **Capture and commit** | opens a **blank commit message** entry, then `chezmoi add` each edited target and one local commit |
+| **Add to .chezmoiignore** | the other answer to the same list: after a confirm, the named targets go into the source's `.chezmoiignore` so chezmoi stops managing and counting them. Nothing in your home is touched — see below |
 | **Suggest** | asks your default agent to write the message from the diff. Only shown when an agent can answer it, and only ever called by that button |
 | **undo** arrow on a commit row | takes that commit back, after asking: it repeats the row and says what taking it back means for it |
 
@@ -93,6 +94,19 @@ The action buttons only appear when there is something for them to do: **Capture
 and commit** arrives with the drift it would capture, and **Push** only when the
 remote has not seen a commit. The commit rows above them record what is already
 committed; they are not a reason for the button.
+
+**Add to .chezmoiignore** is the other answer to the same list. Some drifted
+files are not dotfiles at all — a mail client's config that arrived with an
+installer, a credential helper, a cache. Rather than capturing them into the
+source, the button names them in the source's `.chezmoiignore`, which chezmoi
+matches against target paths, so from the next check on it neither manages nor
+counts them. It asks first, and it repeats the paths it is about to write, so you
+can see which ones the button was pressed against. Nothing in your home is
+deleted, moved or changed: the only file written is `.chezmoiignore` inside the
+source repo, and that edit is a source change like any other — it shows up in the
+repo section and goes into the next capture's diff, so committing it still takes
+a press on **Capture and commit**. Paths already listed are reported back rather
+than written twice.
 
 The panel keeps its shape whether or not there is anything to report. **Dotfile
 Drift** is always the first heading; with nothing to report it carries no count

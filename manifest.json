@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.dadofsambonzuki.chezmoi-hound",
   "name": "Chezmoi Hound",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "author": "Nathan",
   "license": "MIT",
   "homepage": "https://github.com/dadofsambonzuki/chezmoi-hound",

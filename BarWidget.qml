@@ -129,6 +129,9 @@ Panel {
   property string undoSha: ""
   property string suggestHint: ""     // one line under the entry, on what it holds
   property bool settingsOpen: false   // the widget's own options are showing
+  // The ignore confirm. It has no entry: the paths are already named under the
+  // button, so the confirm says what will be written and nothing else.
+  property bool ignoring: false       // the .chezmoiignore confirm is open
 
   // -1 means "the record was there but was not a count", which is different
   // from 0 and must not be mistaken for a valid reading.
@@ -314,6 +317,16 @@ Panel {
     } else if (what === "undo") {
       // One commit, named by its own sha: never a range, never a reflog word.
       args = ["undo", "--commit", root.undoSha]
+    } else if (what === "ignore") {
+      // The paths the panel is showing, named one at a time. The script will
+      // fall back to whatever is drifting if it is given none, but the panel
+      // already knows which ones its button was pressed against, and a list the
+      // person can see before pressing is worth more than one it works out.
+      args = ["ignore"]
+      for (var i = 0; i < root.detail.length; i++) {
+        var p = String(root.detail[i]).replace(/^\s+/, "")
+        if (p !== "") args.push("--path", p)
+      }
     } else {
       args = ["commit"]
       if (root.lastMessage !== "") args.push("--message", root.lastMessage)
@@ -379,6 +392,26 @@ Panel {
     root.asking = false
     root.suggestHint = ""
     messageField.text = ""
+  }
+
+  // ---- the ignore confirm -------------------------------------------------
+  // The same shape as the undo confirm: the button only asks, and the write
+  // happens on the second press. Nothing moves in $HOME either way - this adds
+  // lines to the source's .chezmoiignore, which is why the confirm says so.
+  function askIgnore() {
+    if (root.running !== "" || actionProc.running || root.detail.length === 0) return
+    root.asking = false
+    root.undoRow = ""
+    root.ignoring = true
+  }
+
+  function cancelIgnore() {
+    root.ignoring = false
+  }
+
+  function runIgnore() {
+    root.ignoring = false
+    root.runAction("ignore")
   }
 
   // Which CLI could write a message. Asked of the script rather than guessed from
@@ -595,6 +628,7 @@ Panel {
         // log, which Full details prints.
         root.resultText = root.lastAction === "push" ? "Pushed."
           : root.lastAction === "undo" ? "Undone."
+          : root.lastAction === "ignore" ? "Added to .chezmoiignore — nothing here changed."
           : "Captured and committed."
       } else {
         root.result = "error"
@@ -775,20 +809,114 @@ Panel {
             font.pixelSize: Style.font.bodySmall
           }
 
-          Button {
-            // Nothing to commit means no button: it is only ever the first half
-            // of a commit. The ellipsis is the promise that it opens the message
-            // rather than committing on the spot.
-            visible: root.homeCount > 0
-            text: root.running === "commit" ? "Committing…" : "Capture and commit " + root.plural(root.homeCount, "change") + "…"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
-            fontSize: Style.font.bodySmall
-            horizontalPadding: Style.spacing.controlPaddingX
-            verticalPadding: Style.spacing.controlPaddingY
-            bordered: true
-            opacity: root.running === "" ? 1 : 0.45
-            onClicked: root.askCommit("home")
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            Button {
+              // Nothing to commit means no button: it is only ever the first half
+              // of a commit. The ellipsis is the promise that it opens the message
+              // rather than committing on the spot.
+              visible: root.homeCount > 0
+              text: root.running === "commit" ? "Committing…" : "Capture and commit " + root.plural(root.homeCount, "change") + "…"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              bordered: true
+              opacity: root.running === "" ? 1 : 0.45
+              onClicked: root.askCommit("home")
+            }
+
+            Button {
+              // The other answer to the same list: this was never a dotfile.
+              // Beside the commit button because it is the choice made at the
+              // same moment - capture it, or stop managing it - and the ellipsis
+              // says it asks first.
+              visible: root.homeCount > 0
+              text: root.running === "ignore" ? "Ignoring…" : "Add to .chezmoiignore…"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              bordered: true
+              opacity: root.running === "" ? 1 : 0.45
+              onClicked: root.askIgnore()
+            }
+          }
+
+          // What the ignore button would write, said before it writes it: the
+          // same paths the drift list names, and where they are going. Nothing in
+          // $HOME is touched by this - which is the part worth saying out loud,
+          // since "ignore this file" reads like it might delete or move it.
+          Column {
+            id: ignoreEntry
+            width: parent.width
+            spacing: Style.space(8)
+            visible: root.ignoring
+
+            PanelSectionHeader {
+              text: "IGNORE IN CHEZMOI"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              color: root.sectionTitleColor
+            }
+
+            Repeater {
+              model: root.detail
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "  " + modelData
+                color: root.bar.foreground
+                opacity: 0.75
+                elide: Text.ElideLeft
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "Goes in the source's .chezmoiignore, so chezmoi stops managing "
+                + "and counting " + root.plural(root.detail.length, "path") + ". Nothing in "
+                + "your home is deleted, moved or changed, and the edit to .chezmoiignore "
+                + "is itself uncommitted until you capture it."
+              color: root.bar.foreground
+              opacity: 0.7
+              wrapMode: Text.WordWrap
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Row {
+              spacing: Style.space(8)
+
+              Button {
+                text: "Add " + root.plural(root.detail.length, "path") + " to .chezmoiignore"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                fontSize: Style.font.bodySmall
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
+                bordered: true
+                onClicked: root.runIgnore()
+              }
+
+              Button {
+                text: "Cancel"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                fontSize: Style.font.bodySmall
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
+                bordered: true
+                onClicked: root.cancelIgnore()
+              }
+            }
           }
         }
 
@@ -1379,6 +1507,7 @@ Panel {
         + " commitsTitle=" + root.commitsTitle()
         + " outcomeText=" + (root.resultText === "" ? "none" : root.resultText)
         + " suggesting=" + root.suggesting
+        + " ignoring=" + root.ignoring + " ignorable=" + root.detail.length
     }
 
     // Where the widget actually is on screen, so its rendering can be checked
@@ -1398,6 +1527,7 @@ Panel {
         + " recent=" + root.recentCommits.length
         + " canPush=" + (root.unpushed > 0) + " canCommit=" + (root.homeCount + root.repoCount > 0)
         + " asking=" + root.asking + " where=" + root.askWhere
+        + " ignoring=" + root.ignoring
         + " entryIn=" + (messageEntry.parent === repoSection ? "repo" : "drift")
         + " ai=" + (root.aiCli === "" ? "none" : root.aiCli)
         + " settingsOpen=" + root.settingsOpen
@@ -1421,6 +1551,14 @@ Panel {
       root.runAction("commit")
     }
     function push(): void { root.runAction("push") }
+
+    // The ignore button asks first for the same reason: `ignore` arms the
+    // confirm the way a press does, `ignoreNow` carries it through.
+    function ignore(): void { root.askIgnore() }
+    function ignoreNow(): void {
+      root.askIgnore()
+      root.runIgnore()
+    }
 
     // The undo button asks first, so these do too: `undo` arms the confirm the
     // same way a press on the row does, and `undoNow` carries it through for a

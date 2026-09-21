@@ -22,13 +22,25 @@
 #       machine's default one (Omarchy's `omarchy default agent`), or whatever
 #       --ai names.
 #
-# The three actions are button presses, so none of them prompts. None is
+#   chezmoi-hound-act ignore [--source DIR] [--path TARGET]...
+#       the other answer to drift: not "capture this file into the source" but
+#       "this was never a dotfile". Each named target is added to the source's
+#       .chezmoiignore, which chezmoi matches against target paths, so the next
+#       check neither manages it nor counts it. With no --path, the targets
+#       drifting here right now are the ones named. An empty --path list, or a
+#       path already in the file, is reported rather than written twice. Nothing
+#       is committed: the .chezmoiignore edit is a source change like any other,
+#       so it lands in the next capture's diff and a commit still takes a press.
+#
+# The four actions are button presses, so none of them prompts. None is
 # dangerous in the way that would need one: a commit is local and reversible
 # (the previous HEAD is in the reflog and nothing has been pushed), and the push
 # only ever goes to the branch's existing upstream. This script never
 # force-pushes, never changes a remote, never touches a branch other than the
 # checked-out one, and never deletes a file in $HOME: a target already gone from
 # here is only dropped from the source state, and git keeps the removed file.
+# `ignore` writes one file, and only inside the source repo: .chezmoiignore.
+# Nothing in $HOME is created, changed or removed by this script at all.
 #
 # It prints a short log, which the panel shows. It does not refresh the badge:
 # the widget re-runs its own check when this exits.
@@ -56,7 +68,7 @@ sha=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        commit|push|suggest|undo)
+        commit|push|suggest|undo|ignore)
             [ -n "$action" ] || action="$1"
             shift
             ;;
@@ -84,6 +96,16 @@ while [ $# -gt 0 ]; do
             messagefile="${2:-}"
             shift 2
             ;;
+        --path)
+            paths="${paths:-}${2:-}
+"
+            shift 2
+            ;;
+        --path=*)
+            paths="${paths:-}${1#--path=}
+"
+            shift
+            ;;
         --ai)
             ai="${2:-}"
             shift 2
@@ -99,7 +121,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$action" ]; then
-    echo "usage: chezmoi-hound-act commit | push | suggest [--source DIR] [--dry-run]"
+    echo "usage: chezmoi-hound-act commit | push | suggest | ignore [--source DIR] [--path TARGET]... [--dry-run]"
     exit 2
 fi
 
@@ -779,6 +801,83 @@ case "$action" in
         [ "$removed" -gt 0 ] && printf '%s gone from here, so dropped from the source\n' "$removed"
         ;;
 
+    ignore)
+        # The counterpart to capturing: not "write this file back into the
+        # source" but "nothing here should be a dotfile". The path goes into the
+        # source's .chezmoiignore, which chezmoi matches against target paths, so
+        # from the next check on it is neither managed nor counted.
+        #
+        # Nothing is committed. The edit to .chezmoiignore is itself a change in
+        # the source repo, so it turns up in the repo section and in the next
+        # capture's diff, and a commit still happens only when somebody presses
+        # the button that makes one.
+        work=$(mktemp -d "${TMPDIR:-/tmp}/chezmoi-hound-act.XXXXXX") || exit 0
+        trap 'rm -rf "$work"' EXIT INT TERM
+        ignorefile=$srcdir/.chezmoiignore
+        added=0
+        kept=0
+        : >"$work/added"
+        : >"$work/kept"
+
+        # The paths the panel passed when it knows which ones it showed; the
+        # drifting targets here otherwise, which is the list the button was
+        # pressed against.
+        if [ -n "${paths:-}" ]; then
+            printf '%s\n' "$paths" >"$work/want"
+        else
+            status_paths >"$work/want"
+        fi
+
+        if [ ! -s "$work/want" ]; then
+            echo "nothing to ignore: no drifted path was named"
+            exit 0
+        fi
+
+        while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            # Leading slash on purpose only when the caller sent one: patterns in
+            # this file are target paths as chezmoi writes them, without it.
+            p=${p#./}
+            if [ -f "$ignorefile" ] && grep -Fxq -- "$p" "$ignorefile" 2>/dev/null; then
+                printf 'already in .chezmoiignore: %s\n' "$p" >>"$work/kept"
+                kept=$((kept + 1))
+                continue
+            fi
+            printf '%s\n' "$p" >>"$work/added"
+            added=$((added + 1))
+        done <"$work/want"
+
+        if [ "$added" -eq 0 ]; then
+            echo "nothing to ignore: those paths are already in .chezmoiignore"
+            cat "$work/kept"
+            exit 0
+        fi
+
+        if [ -n "$dry" ]; then
+            printf 'dry run: %s path(s) would be added to %s\n' "$added" "$ignorefile"
+            cat "$work/added" "$work/kept"
+            exit 0
+        fi
+
+        # A heading, written once, so the file reads as a list of decisions
+        # rather than an append log; a blank line above it so it never joins the
+        # last pattern of whatever was already there.
+        if ! grep -Fq '# Not dotfiles: ignored from the panel.' "$ignorefile" 2>/dev/null; then
+            printf '\n# Not dotfiles: ignored from the panel.\n' >>"$ignorefile" || {
+                echo "could not write $ignorefile"
+                exit 1
+            }
+        fi
+        cat "$work/added" >>"$ignorefile" || {
+            echo "could not write $ignorefile"
+            exit 1
+        }
+
+        printf 'added %s path(s) to %s\n' "$added" "$ignorefile"
+        cat "$work/added" "$work/kept"
+        echo "chezmoi no longer manages them; .chezmoiignore itself is uncommitted in the repo"
+        ;;
+
     push)
         upstream=$(gitrepo rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || upstream=""
         if [ -z "$upstream" ]; then
@@ -906,7 +1005,7 @@ case "$action" in
         ;;
 
     *)
-        echo "usage: chezmoi-hound-act commit | push | suggest | undo --commit SHA [--source DIR] [--dry-run] [--message TEXT] [--ai COMMAND]"
+        echo "usage: chezmoi-hound-act commit | push | suggest | ignore | undo --commit SHA [--source DIR] [--path TARGET]... [--dry-run] [--message TEXT] [--ai COMMAND]"
         exit 2
         ;;
 esac

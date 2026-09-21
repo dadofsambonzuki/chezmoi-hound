@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.1.7
+
+- **Add to .chezmoiignore**, beside **Capture and commit**. Not every drifted
+  file is a dotfile: a mail client's config that came with an installer, a
+  credential helper, a cache. Capturing those into the source is the wrong
+  answer, and until now the only answer the panel had. The button names the
+  paths it is showing in the source's `.chezmoiignore`, which chezmoi matches
+  against target paths, so the next check neither manages nor counts them.
+- It asks first and repeats the paths it is about to write, the same shape as the
+  undo confirm. Paths already in the file are reported back rather than written
+  twice, the heading is written once, and a dry run changes nothing.
+- **Nothing in `$HOME` is created, moved, changed or deleted.** The only file
+  written is `.chezmoiignore` inside the source repo, and that edit is a source
+  change like any other: it appears in the repo section and lands in the next
+  capture's diff, so committing it still takes a press on **Capture and commit**.
+- Verified against a throwaway source tree and a throwaway `$HOME` (the real
+  repo and the real home are never read or written by the test): the ignored
+  target disappears from `chezmoi status`, a repeat press reports rather than
+  duplicates, and the no-argument form names whatever is drifting at the time.
+
 ## 1.1.6
 
 - **The sandbox gets one credential, chosen from the transport — not every
