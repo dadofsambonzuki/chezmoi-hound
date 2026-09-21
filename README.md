@@ -137,8 +137,14 @@ files, request dumps and logs that live beside it are not in the namespace.
 Your ssh keys, `gh` credentials,
 keyrings, `chezmoi` config, projects and documents are not in the namespace to be
 read at all, and the environment is cleared: the agent gets `PATH`, `HOME`, `TERM`,
-`LANG`, `TMPDIR` and a provider key, not the shell's exported tokens or its ssh
-agent socket. Reading is disclosure, which is why read-only was not enough here.
+`LANG`, `TMPDIR` and the one credential its own transport takes — `ANTHROPIC_API_KEY`
+for `claude`, `OPENAI_API_KEY` for `codex`, `GEMINI_API_KEY` for `gemini`, none at all
+for `opencode`, which authenticates from its `auth.json`, and for `hermes` the
+variable its configured provider names, taken as that single line out of
+`~/.hermes/.env` — not the shell's exported tokens or its ssh agent socket. Another
+provider's key being in the parent environment, or sitting in that `.env` beside
+hermes', is not a reason to hand it to the agent: the transport is decided first,
+and one credential follows from it. Reading is disclosure, which is why read-only was not enough here.
 Network stays up, because the agent needs its own provider. The diff arrives
 fenced and labelled as untrusted data: a dotfile can have come from anywhere, and
 a line in one is read by whatever runs next.

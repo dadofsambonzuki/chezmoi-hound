@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.1.6
+
+- **The sandbox gets one credential, chosen from the transport — not every
+  variable that looks like one.** Two rules were still broad. `hermes`' provider
+  key was picked out of `~/.hermes/.env` by variable *name*: any line whose name
+  contained `KEY` or `TOKEN` came along, which on a real machine is a GitHub
+  token, a Slack bot token, an ssh key path and half a dozen other providers'
+  keys inside a 539-line file. And the parent environment was raided for every
+  known provider key and copied into *every* agent's sandbox, so a `claude` run
+  carried `OPENAI_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY` and four more
+  it has no use for. The transport is now decided first — for `hermes` from the
+  provider its own config names — and exactly one credential follows: one
+  variable for the selected agent, and for `hermes` that one line of the `.env`.
+- Measured rather than claimed. With a fake key planted for ten providers in the
+  parent environment and six key-shaped lines planted in `.env`, each agent's
+  process now sees only its own: `ANTHROPIC_API_KEY` for `claude`,
+  `OPENAI_API_KEY` for `codex`, `GEMINI_API_KEY` for `gemini`, nothing for
+  `opencode`, and for `hermes` no key in the environment at all plus a single
+  `OPENCODE_GO_API_KEY` line as the only entry in the `.env` it is given. The
+  pre-fix script, run against the same planted environment, showed all eight
+  provider keys in every agent's environment and all six foreign credentials
+  inside hermes' `.env`. The three legs that answer here (opencode, codex,
+  hermes) still answer, with no planted value anywhere in their output.
+
 ## 1.1.5
 
 - **The sandbox shows an agent its own credential, and nothing beside it.** Each

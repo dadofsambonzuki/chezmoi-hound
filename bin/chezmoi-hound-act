@@ -316,6 +316,26 @@ ai_run() {
     # ...and the agent's name, for the same reason: the mount table further down
     # is per-agent, and by the time it is built "$1" is a command line.
     in_ai=$1
+    # Which credential the chosen agent's transport actually takes, named exactly.
+    # A name-shaped filter is not a boundary: "the variables that look like a key"
+    # copies whichever other integrations happen to sit beside the real one - the
+    # hermes .env here is also where a GitHub token, a Slack bot token, an ssh key
+    # path and a dozen provider keys live - straight into the namespace holding the
+    # diff this machine did not write. The transport is decided per agent, and for
+    # hermes by the provider its own config names, so one variable comes across and
+    # nothing else does.
+    ai_key_env=""
+    case "$in_ai" in
+        claude) ai_key_env="ANTHROPIC_API_KEY" ;;
+        codex)  ai_key_env="OPENAI_API_KEY" ;;
+        gemini) ai_key_env="GEMINI_API_KEY" ;;
+        opencode) ai_key_env="" ;;   # opencode authenticates from its own auth.json
+        hermes)
+            hp=$(awk '/^model:/{f=1;next} /^[^[:space:]]/{f=0} f && /^[[:space:]]+provider:/{sub(/^[[:space:]]+provider:[[:space:]]*/,""); print; exit}' "$HOME/.hermes/config.yaml" 2>/dev/null)
+            if [ -n "$hp" ]; then
+                ai_key_env=$(printf '%s' "$hp" | tr 'a-z-' 'A-Z_')_API_KEY
+            fi ;;
+    esac
     # And the command itself has to be resolved out here, before the sandbox
     # exists. The shell that presses Suggest finds some agents as a wrapper in
     # $HOME/.local/bin and the rest through a mise shim in
@@ -493,30 +513,31 @@ HOUNDPLUGIN
             gemini)
                 sandbox_opts="$sandbox_opts --ro-bind-try $work/gemini-policies/00-hound-deny.toml $HOME/.gemini/policies/00-hound-deny.toml" ;;
             hermes)
-                # Its provider key is one line in a 536-line .env that also holds
-                # every other integration's secrets. Only the transport credential
-                # for the configured provider is copied across.
+                # Its provider key is one line among hundreds in a .env that also
+                # holds this machine's other integrations - a GitHub token, a Slack
+                # bot token, an ssh key path. The provider its config names decides
+                # the variable, and only that exact line is copied across.
                 : > "$work/hermes-env"
-                [ -f "$HOME/.hermes/.env" ] &&
-                    grep -E '^[A-Za-z0-9_]*(API_KEY|_KEY|_TOKEN|TOKEN)=' "$HOME/.hermes/.env" > "$work/hermes-env" 2>/dev/null
+                if [ -n "$ai_key_env" ] && [ -f "$HOME/.hermes/.env" ]; then
+                    grep -E "^${ai_key_env}=" "$HOME/.hermes/.env" > "$work/hermes-env" 2>/dev/null
+                fi
                 sandbox_opts="$sandbox_opts --ro-bind-try $work/hermes-env $HOME/.hermes/.env" ;;
         esac
     fi
     set +f
 
     # The environment is the other half of the same problem: a shell that exports
-    # a token has handed that token to the agent. Only the transport's own
-    # variables are passed on, so a GitHub token, cloud credentials or an ssh
-    # agent socket sitting in the parent environment are not part of this process
-    # at all. The agents read their credentials from their own directories, which
-    # is what those directories are there for.
+    # a token has handed that token to the agent. Exactly one variable is passed on -
+    # the transport credential of the agent that was selected - so a GitHub token,
+    # another provider's key, cloud credentials or an ssh agent socket sitting in the
+    # parent environment are not part of this process at all. The agents read their
+    # credentials from their own directories, which is what those directories are for.
     env_opts="--clearenv --setenv PATH $PATH --setenv HOME $HOME --setenv TMPDIR /tmp"
     env_opts="$env_opts --setenv TERM ${TERM:-dumb} --setenv LANG ${LANG:-C.UTF-8}"
-    for v in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY \
-             OPENROUTER_API_KEY XAI_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY; do
-        eval "sandbox_value=\${$v:-}"
-        [ -n "$sandbox_value" ] && env_opts="$env_opts --setenv $v $sandbox_value"
-    done
+    if [ -n "$ai_key_env" ]; then
+        eval "sandbox_value=\${$ai_key_env:-}"
+        [ -n "$sandbox_value" ] && env_opts="$env_opts --setenv $ai_key_env $sandbox_value"
+    fi
 
     # Network stays: the provider transport is the one thing the agent is here to
     # reach, and with the filesystem allowlisted and the environment cleared there
