@@ -143,11 +143,18 @@ The agent is asked to work with its tools off — `claude --tools ''`, `codex ex
 plugin tools stripped for `codex`, and a plugin that rejects tool calls for
 `opencode` — and runs inside a `bubblewrap` namespace, which is required:
 the allowlist is the machine's runtime (`/usr`, `/etc`, `/opt`), the agents' own
-runtimes (`~/.local/share/mise`, `~/.local/share/uv`), the resolver file, `/proc`,
+runtimes (`~/.local/share/mise`, `~/.local/share/uv`, and for `hermes` its tool
+store under `~/.hermes/tools`), the resolver file, `/proc`,
 `/dev` and an empty directory as its working directory. `$HOME` itself is empty —
 each agent's state directory is re-created empty too, and only the single
 credential file a run needs to authenticate is put back into it, so the session
 files, request dumps and logs that live beside it are not in the namespace.
+`hermes` needs more than its state directory put back, because it resolves its own
+interpreter and its dependency generation out of `$HOME/.hermes` and leases the
+generation it activates: it is given a writable install-state directory of the
+run's own, with the machine's `environments/`, `pm-runtime/`, `bootstrap/` and
+`facts.json` bound into it read-only, so the lock and the leases land in a
+throwaway tree and the generations themselves are never written to.
 Your ssh keys, `gh` credentials,
 keyrings, `chezmoi` config, projects and documents are not in the namespace to be
 read at all, and the environment is cleared: the agent gets `PATH`, `HOME`, `TERM`,
@@ -159,6 +166,11 @@ variable its configured provider names, taken as that single line out of
 provider's key being in the parent environment, or sitting in that `.env` beside
 hermes', is not a reason to hand it to the agent: the transport is decided first,
 and one credential follows from it. Reading is disclosure, which is why read-only was not enough here.
+`hermes` is additionally given `HERMES_DISABLE_LAZY_INSTALLS=1`: it cannot
+establish that the dependency generation it was handed is current — the one thing
+it would normally settle by installing — so without it every press takes the
+source-update path and says so on stderr. The flag means "run with what is here",
+which is what this leg is.
 Network stays up, because the agent needs its own provider. The diff arrives
 fenced and labelled as untrusted data: a dotfile can have come from anywhere, and
 a line in one is read by whatever runs next.
@@ -205,7 +217,8 @@ The plugin is two POSIX `sh` scripts plus one QML file:
   `claude -p`, `codex exec`, `gemini -p`, `opencode run` — and does nothing at
   all when your agent is not one of those. The agent is given no tools to act
   with, and runs in a `bubblewrap` namespace holding nothing of yours beyond that
-  agent's own credential file; without `bubblewrap` there is no **Suggest** leg. It runs in
+  agent's own credential file and its own runtime; without `bubblewrap` there is no
+  **Suggest** leg. It runs in
   a directory of its own rather than in the tree it is describing, under a
   timeout, and if it answers with nothing usable the entry stays as you left it.
   It cannot commit anything: it fills the entry, and the commit still needs the

@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.1.8
+
+- **A hermes suggestion runs again after the install layout moved under
+  `~/.hermes`.** hermes resolves its own interpreter and its dependency generation
+  out of `$HOME/.hermes`, and the namespace's empty home took both away: the
+  launcher died on its own second line —
+  `…/.hermes/tools/python-3.14.7/bin/python3: No such file or directory`, status
+  127 — which is what the panel showed. Its tool store is now bound read-only, and
+  its install state is this run's own writable directory with `environments/`,
+  `pm-runtime/`, `bootstrap/` and `facts.json` bound in read-only from the machine.
+- **A read-only install state is not enough, and that was measured rather than
+  reasoned.** hermes takes a lock beside its install and leases the generation it
+  activates on every launch, so binding the tree read-only moves the failure one
+  step later: `Read-only file system: …/installs/<key>/.install.lock`, exit 1. The
+  lock, the completion marker and the leases now land in the throwaway tree, and
+  the generation directories themselves are never written to.
+- **hermes is asked not to install anything.** With its own install state out of
+  reach it cannot establish that the generation matches the source, so it takes the
+  source-update path: `completing source-update dependencies...`, an attempt to
+  re-resolve tools it was never given, and a warning on stderr for every press. It
+  is launched with `HERMES_DISABLE_LAZY_INSTALLS=1` — the flag means "run with what
+  is here, install nothing", which is exactly this leg — and answers cleanly.
+- Measured on this machine's own drift: a **Suggest** run returns a commit message
+  in about nine seconds, exit 0, with nothing on stderr; the lease files and
+  `.install.lock` under `~/.hermes/installs` are byte-identical before and after,
+  so the machine's install tree is not written by a suggestion. Before the fix the
+  same press was `HOUND-SUGGEST failed=hermes status=127` with the interpreter line
+  above, reproduced in isolation in a `bwrap` namespace holding exactly the mounts
+  the script builds.
+
 ## 1.1.7
 
 - **Add to .chezmoiignore**, beside **Capture and commit**. Not every drifted

@@ -276,6 +276,51 @@ ai_one_shot() {
     esac
 }
 
+# The runtime a hermes launch needs, printed as bubblewrap arguments: the tool
+# store its launcher execs its interpreter out of, and one writable install state
+# per install key with the machine's own content read-only inside it.
+#
+# hermes resolves both its interpreter and its dependency generation through
+# $HOME/.hermes, which the empty home put on first has taken away - and the
+# interpreter is under ~/.hermes/tools since the install layout moved off uv's
+# pythons under ~/.local/share/uv. Without the tool store the launcher died at
+# its own second line, "…/tools/python-3.14.7/bin/python3: No such file or
+# directory", status 127, which is what the panel showed.
+#
+# The dependency generation under ~/.hermes/installs/<key> cannot just be bound
+# read-only either: hermes takes a lock beside it and leases the generation it
+# activates on every launch, so a read-only install exits 1 with "Read-only file
+# system: …/installs/<key>/.install.lock". The state directory is therefore this
+# run's own - the same shape as the agent's state below - with environments/,
+# pm-runtime/, bootstrap/ and facts.json bound in read-only from the machine and a
+# writable .leases per generation, so the lock and the leases land in the throwaway
+# tree and the generations themselves are never written to.
+#
+# Printed rather than assigned because the globs have to expand, and the caller
+# has -f on at this point on purpose. Paths with spaces are not supported anywhere
+# in this leg.
+hermes_runtime_mounts() {
+    [ -d "$HOME/.hermes/tools" ] &&
+        printf '%s\n' --ro-bind "$HOME/.hermes/tools" "$HOME/.hermes/tools"
+    for key in "$HOME"/.hermes/installs/*/; do
+        [ -d "$key" ] || continue
+        kd=${key%/}
+        istate="$state_root$kd"
+        mkdir -p "$istate" 2>/dev/null || continue
+        printf '%s\n' --bind "$istate" "$kd"
+        for c in environments pm-runtime bootstrap facts.json; do
+            [ -e "$kd/$c" ] &&
+                printf '%s\n' --ro-bind "$kd/$c" "$kd/$c"
+        done
+        for gen in "$kd"/environments/*/; do
+            [ -d "$gen" ] || continue
+            g=${gen%/}
+            mkdir -p "$istate/environments/${g##*/}/.leases" 2>/dev/null || continue
+            printf '%s\n' --bind "$istate/environments/${g##*/}/.leases" "$g/.leases"
+        done
+    done
+}
+
 # Which agent should write the message, or nothing at all. --ai (the widget's
 # setting) and $HOUND_AI override everything, for pinning one agent or testing.
 ai_command() {
@@ -498,8 +543,14 @@ $(head -c 12000 "$3")"
     # this run. The codex config in particular is written here rather than mounted:
     # the user's own names plugin marketplaces that hand the agent a browser and
     # computer-use tools, and only its model line is read out.
-    [ "$in_ai" = hermes ] && [ -d "$HOME/.hermes/hermes-agent" ] &&
-        sandbox_opts="$sandbox_opts --ro-bind $HOME/.hermes/hermes-agent $HOME/.hermes/hermes-agent"
+    if [ "$in_ai" = hermes ]; then
+        [ -d "$HOME/.hermes/hermes-agent" ] &&
+            sandbox_opts="$sandbox_opts --ro-bind $HOME/.hermes/hermes-agent $HOME/.hermes/hermes-agent"
+        # Its interpreter, its tool store and its dependency generation. Under a
+        # subshell so the globs expand: this shell is holding -f on purpose.
+        hermes_mounts=$(set +f; hermes_runtime_mounts)
+        [ -n "$hermes_mounts" ] && sandbox_opts="$sandbox_opts $hermes_mounts"
+    fi
     if [ -n "$work" ]; then
         mkdir -p "$work/gemini-policies"
         printf '%s\n' \
@@ -556,6 +607,14 @@ HOUNDPLUGIN
     # credentials from their own directories, which is what those directories are for.
     env_opts="--clearenv --setenv PATH $PATH --setenv HOME $HOME --setenv TMPDIR /tmp"
     env_opts="$env_opts --setenv TERM ${TERM:-dumb} --setenv LANG ${LANG:-C.UTF-8}"
+    # hermes repairs or completes its own dependency generation on launch when it
+    # cannot establish that the one under ~/.hermes/installs is current, and this
+    # run is deliberately not the machine's install state. Without this it takes
+    # the source-update path, tries to write markers and re-resolve tools it was
+    # never given, and says so on stderr; with it the leg uses the generation it
+    # was handed and installs nothing. The flag exists in hermes itself for exactly
+    # this - a launch that must not install anything.
+    [ "$in_ai" = hermes ] && env_opts="$env_opts --setenv HERMES_DISABLE_LAZY_INSTALLS 1"
     if [ -n "$ai_key_env" ]; then
         eval "sandbox_value=\${$ai_key_env:-}"
         [ -n "$sandbox_value" ] && env_opts="$env_opts --setenv $ai_key_env $sandbox_value"
