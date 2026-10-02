@@ -87,6 +87,7 @@ layout in `~/.config/omarchy/shell.json`, which Omarchy writes itself.
 | **Push N commits** | `git push` on the branch's existing upstream — nothing else |
 | **Capture and commit** | opens a **blank commit message** entry, then `chezmoi add` each edited target and one local commit |
 | **Add to .chezmoiignore** | the other answer to the same list: after a confirm, the named targets go into the source's `.chezmoiignore` so chezmoi stops managing and counting them. Nothing in your home is touched — see below |
+| **Apply the source** | the third answer, and the one for a file chezmoi generates itself: after a confirm, the source's version of the named targets goes back into your home. The only action here that writes to your home — an edited path is reported, not overwritten |
 | **Suggest** | asks your default agent to write the message from the diff. Only shown when an agent can answer it, and only ever called by that button |
 | **undo** arrow on a commit row | takes that commit back, after asking: it repeats the row and says what taking it back means for it |
 
@@ -107,6 +108,18 @@ source repo, and that edit is a source change like any other — it shows up in 
 repo section and goes into the next capture's diff, so committing it still takes
 a press on **Capture and commit**. Paths already listed are reported back rather
 than written twice.
+
+**Apply the source** is the third answer, and the one for a file chezmoi
+generates itself — a rendered template. Capturing one of those would freeze
+whatever this machine happens to have today into the source as though it were an
+edit you made, so **Capture and commit** refuses it and says so; ignoring it
+gives up managing it; and the count would otherwise sit in the panel with no
+button that answered it. Applying puts the source's version back for the paths
+the panel is showing, and the count clears because the two agree again. It is the
+only action here that writes to your home, which is why it asks first and repeats
+the paths. It is never `chezmoi --force`: a path that has changed since chezmoi
+last wrote it is left exactly as it is and reported as *left alone, changed here
+since chezmoi wrote it*, so nothing you have edited can be lost by pressing it.
 
 The panel keeps its shape whether or not there is anything to report. **Dotfile
 Drift** is always the first heading; with nothing to report it carries no count

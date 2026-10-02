@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.2.0
+
+- **Apply the source — the panel can now clear drift it could previously only
+  show.** Some drifted targets are files chezmoi generates itself, from a
+  template. **Capture and commit** refuses those on purpose (re-adding a templated
+  source would stop it being a template and freeze whatever this machine happens
+  to have today), and **Add to .chezmoiignore** gives up managing them, so the
+  count could sit in the panel with no button that answered it. **Apply the
+  source…** puts the source's version back for the paths the panel is showing, and
+  the count clears because the two agree again.
+- **It asks first, and it is never `--force`.** This is the only action here that
+  writes to `$HOME`: it repeats the paths it is about to write, and a path that
+  has changed since chezmoi last wrote it comes back as
+  *left alone, changed here since chezmoi wrote it* — reported, not overwritten —
+  so an edit of yours cannot be lost by pressing it.
+- **Only the named paths, never the whole tree**, and one chezmoi process per
+  path: the outcome is per path (applied, left alone, could not be applied) and
+  that is what the panel prints, rather than one opaque exit code for a batch that
+  half-succeeded.
+- Scriptable the way the other buttons are: `chezmoi-hound-act apply [--source
+  DIR] [--path TARGET]...`, and the IPC pair `applySource` / `applySourceNow` for
+  a keybind or an agent.
+
 ## 1.1.8
 
 - **A hermes suggestion runs again after the install layout moved under

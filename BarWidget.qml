@@ -132,6 +132,9 @@ Panel {
   // The ignore confirm. It has no entry: the paths are already named under the
   // button, so the confirm says what will be written and nothing else.
   property bool ignoring: false       // the .chezmoiignore confirm is open
+  // The apply confirm - same shape, same reason for asking: it is the only
+  // action here that writes to $HOME.
+  property bool applying: false       // the apply-the-source confirm is open
 
   // -1 means "the record was there but was not a count", which is different
   // from 0 and must not be mistaken for a valid reading.
@@ -317,12 +320,14 @@ Panel {
     } else if (what === "undo") {
       // One commit, named by its own sha: never a range, never a reflog word.
       args = ["undo", "--commit", root.undoSha]
-    } else if (what === "ignore") {
-      // The paths the panel is showing, named one at a time. The script will
-      // fall back to whatever is drifting if it is given none, but the panel
-      // already knows which ones its button was pressed against, and a list the
-      // person can see before pressing is worth more than one it works out.
-      args = ["ignore"]
+    } else if (what === "ignore" || what === "apply") {
+      // The paths the panel is showing, named one at a time - both the answer
+      // that stops managing them and the answer that puts the source's version
+      // back. The script will fall back to whatever is drifting if it is given
+      // none, but the panel already knows which ones its button was pressed
+      // against, and a list the person can see before pressing is worth more
+      // than one it works out.
+      args = [what]
       for (var i = 0; i < root.detail.length; i++) {
         var p = String(root.detail[i]).replace(/^\s+/, "")
         if (p !== "") args.push("--path", p)
@@ -401,6 +406,7 @@ Panel {
   function askIgnore() {
     if (root.running !== "" || actionProc.running || root.detail.length === 0) return
     root.asking = false
+    root.applying = false
     root.undoRow = ""
     root.ignoring = true
   }
@@ -412,6 +418,29 @@ Panel {
   function runIgnore() {
     root.ignoring = false
     root.runAction("ignore")
+  }
+
+  // ---- the apply confirm --------------------------------------------------
+  // The same shape again, and it asks for the same reason the ignore confirm
+  // does: this is the one button here that writes to $HOME, so the second press
+  // is the one that decides. Nothing can be lost by pressing it - chezmoi leaves
+  // a target that has changed since it last wrote it, and the script reports
+  // those paths rather than overwriting them.
+  function askApply() {
+    if (root.running !== "" || actionProc.running || root.detail.length === 0) return
+    root.asking = false
+    root.ignoring = false
+    root.undoRow = ""
+    root.applying = true
+  }
+
+  function cancelApply() {
+    root.applying = false
+  }
+
+  function runApply() {
+    root.applying = false
+    root.runAction("apply")
   }
 
   // Which CLI could write a message. Asked of the script rather than guessed from
@@ -629,6 +658,7 @@ Panel {
         root.resultText = root.lastAction === "push" ? "Pushed."
           : root.lastAction === "undo" ? "Undone."
           : root.lastAction === "ignore" ? "Added to .chezmoiignore — nothing here changed."
+          : root.lastAction === "apply" ? "Applied the source — those paths match it again."
           : "Captured and committed."
       } else {
         root.result = "error"
@@ -847,6 +877,29 @@ Panel {
             }
           }
 
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            Button {
+              // The third answer, and the one for a target chezmoi generates
+              // itself: that cannot be captured (its source is a template) and
+              // should not be ignored, so without this the panel can show the
+              // drift and never clear it. On its own line because it is the only
+              // one of the three that writes to $HOME.
+              visible: root.homeCount > 0
+              text: root.running === "apply" ? "Applying…" : "Apply the source…"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              bordered: true
+              opacity: root.running === "" ? 1 : 0.45
+              onClicked: root.askApply()
+            }
+          }
+
           // What the ignore button would write, said before it writes it: the
           // same paths the drift list names, and where they are going. Nothing in
           // $HOME is touched by this - which is the part worth saying out loud,
@@ -915,6 +968,80 @@ Panel {
                 verticalPadding: Style.spacing.controlPaddingY
                 bordered: true
                 onClicked: root.cancelIgnore()
+              }
+            }
+          }
+
+          // What the apply button would do, said before it does it - the same
+          // paths, and the part worth saying out loud: this one does write to
+          // $HOME, and it is the only way to clear drift for a file chezmoi
+          // renders itself. A path edited since chezmoi last wrote it is named
+          // and left alone rather than overwritten.
+          Column {
+            id: applyEntry
+            width: parent.width
+            spacing: Style.space(8)
+            visible: root.applying
+
+            PanelSectionHeader {
+              text: "APPLY THE SOURCE"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              color: root.sectionTitleColor
+            }
+
+            Repeater {
+              model: root.detail
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "  " + modelData
+                color: root.bar.foreground
+                opacity: 0.75
+                elide: Text.ElideLeft
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "Puts the source's version of " + root.plural(root.detail.length, "that path")
+                + " back in your home. This is how drift clears for a file chezmoi generates "
+                + "itself, which cannot be captured and should not be ignored. A path you have "
+                + "edited since chezmoi last wrote it is left alone and reported, never "
+                + "overwritten."
+              color: root.bar.foreground
+              opacity: 0.7
+              wrapMode: Text.WordWrap
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Row {
+              spacing: Style.space(8)
+
+              Button {
+                text: "Apply " + root.plural(root.detail.length, "path") + " from the source"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                fontSize: Style.font.bodySmall
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
+                bordered: true
+                onClicked: root.runApply()
+              }
+
+              Button {
+                text: "Cancel"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                fontSize: Style.font.bodySmall
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
+                bordered: true
+                onClicked: root.cancelApply()
               }
             }
           }
@@ -1508,6 +1635,7 @@ Panel {
         + " outcomeText=" + (root.resultText === "" ? "none" : root.resultText)
         + " suggesting=" + root.suggesting
         + " ignoring=" + root.ignoring + " ignorable=" + root.detail.length
+        + " applying=" + root.applying
     }
 
     // Where the widget actually is on screen, so its rendering can be checked
@@ -1528,6 +1656,7 @@ Panel {
         + " canPush=" + (root.unpushed > 0) + " canCommit=" + (root.homeCount + root.repoCount > 0)
         + " asking=" + root.asking + " where=" + root.askWhere
         + " ignoring=" + root.ignoring
+        + " applying=" + root.applying
         + " entryIn=" + (messageEntry.parent === repoSection ? "repo" : "drift")
         + " ai=" + (root.aiCli === "" ? "none" : root.aiCli)
         + " settingsOpen=" + root.settingsOpen
@@ -1558,6 +1687,15 @@ Panel {
     function ignoreNow(): void {
       root.askIgnore()
       root.runIgnore()
+    }
+
+    // Apply is the one action that writes to $HOME, so it asks first too:
+    // `applySource` arms the confirm, `applySourceNow` carries it through for a
+    // script or a keybind with nobody to press the second button.
+    function applySource(): void { root.askApply() }
+    function applySourceNow(): void {
+      root.askApply()
+      root.runApply()
     }
 
     // The undo button asks first, so these do too: `undo` arms the confirm the
