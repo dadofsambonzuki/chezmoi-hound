@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2.1
+
+- **A generation hermes has not leased yet no longer kills the leg.** 1.1.8 gave the
+  hermes leg a writable install-state directory with the machine's own content bound
+  into it read-only, and one writable `.leases` per generation. hermes' next update
+  commits *new* generation directories, and a new generation has no `.leases` until it
+  is activated — a mount point that does not exist cannot be created inside a read-only
+  parent, so every press died before hermes started:
+  `bwrap: Can't create file …/environments/<gen>/.leases: Read-only file system`, which
+  the panel reported as status 1.
+- **The install state is an overlay now, not a mirror.** `--overlay-src` on the
+  machine's state with `--tmp-overlay` on the same path: reads come from the machine,
+  every write — the lock, the completion marker, the generation leases, anything a later
+  version decides to write — lands in an invisible tmpfs of the run's own. Nothing has
+  to exist beforehand, and nothing in the machine's install tree is touched.
+- Measured: a **Suggest** run against this machine's drift answers with a commit message,
+  exit 0, on a machine holding five generations, two of which have never been activated
+  — the case that broke 1.1.8. The lease files and locks under `~/.hermes/installs` are
+  identical before and after the run.
+- Also measured, and worth knowing rather than fixing: inside the sandbox hermes prints
+  `⚠ install out of sync (venv: out of sync with uv.lock)` to stderr, because the plugin
+  members its stamp covers are deliberately not in the namespace, so it cannot confirm
+  the generation against the lockfile. It is a passive verdict, not a failure: the leg
+  activates the generation it was given and answers. The plugin surfaces stderr only
+  when a run fails.
+
 ## 1.2.0
 
 - **Apply the source — the panel can now clear drift it could previously only

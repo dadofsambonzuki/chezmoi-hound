@@ -44,7 +44,7 @@ External dependencies, all of which an Omarchy machine already has:
 | [`chezmoi`](https://www.chezmoi.io/) | reads the drift in `$HOME` | any v2 (`chezmoi status`, `chezmoi source-path`) |
 | `git` | the source repo's working tree and its unpushed commits | any |
 | `omarchy-launch-floating-terminal-with-presentation` | the panel's **Full details** button | ships with Omarchy |
-| [`bubblewrap`](https://github.com/containers/bubblewrap) | the sandbox a **Suggest** run happens inside — **Suggest** does not run without it | any (`bwrap --tmp-overlay`) |
+| [`bubblewrap`](https://github.com/containers/bubblewrap) | the sandbox a **Suggest** run happens inside — **Suggest** does not run without it | any with overlays (`--overlay-src` + `--tmp-overlay`) |
 
 There is no dependency on `jq`, on a systemd timer, or on anything in
 `~/.local/bin`: the widget ships its own two scripts and runs them itself.
@@ -164,10 +164,10 @@ credential file a run needs to authenticate is put back into it, so the session
 files, request dumps and logs that live beside it are not in the namespace.
 `hermes` needs more than its state directory put back, because it resolves its own
 interpreter and its dependency generation out of `$HOME/.hermes` and leases the
-generation it activates: it is given a writable install-state directory of the
-run's own, with the machine's `environments/`, `pm-runtime/`, `bootstrap/` and
-`facts.json` bound into it read-only, so the lock and the leases land in a
-throwaway tree and the generations themselves are never written to.
+generation it activates: its tool store is bound read-only, and its install state
+is overlaid — `--overlay-src` on the machine's tree with `--tmp-overlay` on the
+same path — so every lock, marker and lease a run writes lands in an invisible
+tmpfs of the run's own and nothing on the machine is touched.
 Your ssh keys, `gh` credentials,
 keyrings, `chezmoi` config, projects and documents are not in the namespace to be
 read at all, and the environment is cleared: the agent gets `PATH`, `HOME`, `TERM`,
