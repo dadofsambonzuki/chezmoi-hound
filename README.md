@@ -1,3 +1,11 @@
+> **This GitHub repository is a read-only mirror.**
+>
+> The canonical home is [https://gitworkshop.dev/nathan@day.ag/chezmoi-hound](https://gitworkshop.dev/nathan@day.ag/chezmoi-hound). Clone it with Git and Nostr:
+> `git clone nostr://nathan@day.ag/chezmoi-hound`
+>
+> Issues, pull requests and releases live there. Anything opened here may be
+> closed without action.
+
 # Chezmoi Hound
 
 An [Omarchy](https://omarchy.org/) plugin that sniffs out **Dotfile Drift** and helps you stay synced. **Woof!**
